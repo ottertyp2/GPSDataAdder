@@ -23,6 +23,10 @@ DEFAULT_TOW_DOPPLER_MAX_HZ = 5_000
 DEFAULT_TOW_DOPPLER_STEP_HZ = 500
 DEFAULT_TOW_ACQUISITION_MS = 8
 DEFAULT_TOW_TRACK_SECONDS = 12.5
+FRAUNHOFER_FAST_START_TIME_S = 60.0
+FRAUNHOFER_FAST_ACQUISITION_WINDOW_S = 1.2
+FRAUNHOFER_FAST_TRACKING_S = 18.0
+FRAUNHOFER_FAST_MAX_SATELLITES = 3
 FRAUNHOFER_PVT_START_TIME_S = 60.0
 FRAUNHOFER_PVT_ACQUISITION_WINDOW_S = 3.0
 FRAUNHOFER_PVT_TRACKING_S = 60.0
@@ -403,10 +407,185 @@ else:
     )
 
 
+def _detect_with_fraunhofer_fast_tow_pipeline(
+    path: Path,
+    sample_rate_hz: float,
+    compute_backend: str = "auto",
+    max_workers: int | None = None,
+) -> TowDetectionResult | None:
+    project = _fraunhofer_project_path()
+    if project is None:
+        return None
+
+    script = r"""
+import json
+import sys
+
+from app.dsp.acquisition import acquisition_rank_key, acquisition_result_is_plausible, scan_prns_from_session
+from app.dsp.io import Complex64FileSource
+from app.dsp.navdecode import decode_navigation_from_tracking
+from app.dsp.tracking import track_file
+from app.models import SessionConfig
+
+file_path = sys.argv[1]
+sample_rate = float(sys.argv[2])
+backend = sys.argv[3]
+max_workers = int(sys.argv[4])
+start_time_s = float(sys.argv[5])
+acquisition_window_s = float(sys.argv[6])
+tracking_s = float(sys.argv[7])
+max_satellites = int(sys.argv[8])
+
+source = Complex64FileSource(file_path)
+start_sample = int(round(max(0.0, start_time_s) * sample_rate))
+sample_count = int(round(max(0.2, acquisition_window_s) * sample_rate))
+sample_count = min(sample_count, max(0, source.total_samples - start_sample))
+if sample_count <= 0:
+    print("{}")
+    raise SystemExit(0)
+
+samples = source.read_window(start_sample, sample_count)
+session = SessionConfig(
+    file_path=file_path,
+    sample_rate=sample_rate,
+    compute_backend=backend,
+    max_workers=max_workers,
+    gpu_enabled=(backend != "cpu"),
+)
+session.start_sample = start_sample
+session.sample_count = sample_count
+session.doppler_min = -12000
+session.doppler_max = 12000
+session.doppler_step = 500
+session.integration_ms = 20
+session.acquisition_segment_count = 3
+session.spread_acquisition_blocks = False
+
+results = scan_prns_from_session(
+    samples,
+    session,
+    prns=list(range(1, 33)),
+    progress_callback=None,
+    log_callback=None,
+)
+ranked = sorted(results, key=acquisition_rank_key, reverse=True)
+plausible = [result for result in ranked if acquisition_result_is_plausible(result)]
+candidates = (plausible or ranked)[: max(1, max_satellites)]
+
+rows = []
+for acquisition in candidates:
+    tracking_session = SessionConfig(
+        file_path=file_path,
+        sample_rate=sample_rate,
+        compute_backend=backend,
+        max_workers=max_workers,
+        gpu_enabled=(backend != "cpu"),
+    )
+    tracking_session.prn = int(acquisition.prn)
+    tracking_session.tracking_ms = int(round(max(6.0, tracking_s) * 1000.0))
+    absolute_start = start_sample + int(acquisition.best_candidate.segment_start_sample)
+    tracking = track_file(
+        file_path,
+        absolute_start,
+        tracking_session,
+        acquisition,
+        progress_callback=None,
+        log_callback=None,
+    )
+    bit_result, nav_result = decode_navigation_from_tracking(tracking)
+    for subframe in nav_result.subframes:
+        if not subframe.valid or subframe.tow_seconds is None or subframe.subframe_id is None:
+            continue
+        bit_ms = 0
+        if 0 <= subframe.start_bit < bit_result.bit_start_ms.size:
+            bit_ms = int(bit_result.bit_start_ms[subframe.start_bit])
+        file_time_s = float(absolute_start) / float(sample_rate) + bit_ms * 1e-3
+        tow_count = int(subframe.tow_seconds) // 6
+        subframe_offset = int(round(file_time_s / 6.0))
+        rows.append(
+            {
+                "tow_count": tow_count,
+                "tow_seconds": int(subframe.tow_seconds),
+                "subframe_id": int(subframe.subframe_id),
+                "prn": int(acquisition.prn),
+                "doppler_hz": float(acquisition.best_candidate.doppler_hz),
+                "code_phase_samples": int(acquisition.best_candidate.code_phase_samples),
+                "acquisition_metric": float(acquisition.best_candidate.metric),
+                "file_time_s": file_time_s,
+                "bit_index": int(subframe.start_bit),
+                "tracked_ms": int(tracking.times_s.size),
+                "synthetic_start_tow_count": int((tow_count - subframe_offset) % (604800 // 6)),
+                "synthetic_start_subframe_id": int(((int(subframe.subframe_id) - 1 - subframe_offset) % 5) + 1),
+                "source": f"Fraunhofer_FHR fast TOW pipeline ({backend})",
+            }
+        )
+        break
+    if rows:
+        break
+
+if rows:
+    rows.sort(key=lambda item: item["file_time_s"])
+    print(json.dumps(rows[0], sort_keys=True))
+else:
+    print("{}")
+"""
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                script,
+                str(path),
+                str(float(sample_rate_hz)),
+                compute_backend,
+                str(int(max_workers or 0)),
+                str(FRAUNHOFER_FAST_START_TIME_S),
+                str(FRAUNHOFER_FAST_ACQUISITION_WINDOW_S),
+                str(FRAUNHOFER_FAST_TRACKING_S),
+                str(FRAUNHOFER_FAST_MAX_SATELLITES),
+            ],
+            cwd=str(project),
+            text=True,
+            capture_output=True,
+            timeout=300,
+            check=False,
+        )
+    except Exception:
+        return None
+    if completed.returncode != 0:
+        return None
+    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    if not lines:
+        return None
+    try:
+        payload = json.loads(lines[-1])
+    except json.JSONDecodeError:
+        return None
+    if not payload:
+        return None
+    return TowDetectionResult(
+        tow_count=int(payload["tow_count"]),
+        tow_seconds=int(payload["tow_seconds"]),
+        subframe_id=int(payload["subframe_id"]),
+        prn=int(payload.get("prn", 0)),
+        doppler_hz=float(payload.get("doppler_hz", 0.0)),
+        code_phase_samples=int(payload.get("code_phase_samples", 0)),
+        acquisition_metric=float(payload.get("acquisition_metric", 0.0)),
+        bit_index=int(payload.get("bit_index", 0)),
+        polarity="pvt",
+        tracked_ms=int(payload.get("tracked_ms", 0)),
+        source=str(payload.get("source", "Fraunhofer_FHR fast TOW pipeline")),
+        synthetic_start_tow_count=int(payload.get("synthetic_start_tow_count", payload["tow_count"])),
+        synthetic_start_subframe_id=int(payload.get("synthetic_start_subframe_id", payload["subframe_id"])),
+        file_time_s=float(payload.get("file_time_s", 0.0)),
+    )
+
+
 def detect_measurement_tow(
     input_path: str | Path,
     sample_rate_hz: float,
     compute_backend: str = "auto",
+    max_workers: int | None = None,
     prns: Sequence[int] = DEFAULT_TOW_PRNS,
     acquisition_ms: int = DEFAULT_TOW_ACQUISITION_MS,
     track_seconds: float = DEFAULT_TOW_TRACK_SECONDS,
@@ -426,7 +605,17 @@ def detect_measurement_tow(
         raise ValueError("Sample rate must be positive for TOW detection.")
     total_samples = count_complex64_samples(path)
     duration_s = float(total_samples) / float(sample_rate_hz)
-    if duration_s >= FRAUNHOFER_PVT_MIN_DURATION_S:
+    if duration_s >= (FRAUNHOFER_FAST_START_TIME_S + FRAUNHOFER_FAST_TRACKING_S + 1.0):
+        fast_result = _detect_with_fraunhofer_fast_tow_pipeline(
+            path,
+            sample_rate_hz=sample_rate_hz,
+            compute_backend=compute_backend,
+            max_workers=max_workers,
+        )
+        if fast_result is not None:
+            return fast_result
+
+    if os.environ.get("GPSDATAADDER_FULL_PVT_FALLBACK", "").strip() == "1" and duration_s >= FRAUNHOFER_PVT_MIN_DURATION_S:
         pvt_result = _detect_with_fraunhofer_pvt_pipeline(
             path,
             sample_rate_hz=sample_rate_hz,

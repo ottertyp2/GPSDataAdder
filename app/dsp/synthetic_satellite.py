@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 from typing import Callable
+import warnings
 
 import numpy as np
 
@@ -23,7 +24,7 @@ DEFAULT_TARGET_CN0_DBHZ = 42.0
 DEFAULT_AMPLITUDE_PROBE_SAMPLES = 262_144
 DEFAULT_AMPLITUDE_PROBE_WINDOWS = 7
 DEFAULT_CHUNK_SAMPLES = 4_000_000
-DEFAULT_WORKER_COUNT = max(1, min(8, (os.cpu_count() or 2) - 1))
+DEFAULT_WORKER_COUNT = max(1, (os.cpu_count() or 2) - 1)
 DEFAULT_IN_FLIGHT_BLOCKS = DEFAULT_WORKER_COUNT * 2
 COMPUTE_BACKENDS = ("auto", "cpu", "gpu")
 
@@ -145,7 +146,13 @@ def count_complex64_samples(path: str | Path) -> int:
 
 def _load_cupy():
     try:
-        import cupy as cp
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="CUDA path could not be detected.*",
+                category=UserWarning,
+            )
+            import cupy as cp
         if cp.cuda.runtime.getDeviceCount() <= 0:
             raise RuntimeError("No CUDA device reported by CuPy.")
     except Exception as exc:
@@ -539,7 +546,12 @@ def detect_synthetic_signal_plan(
     try:
         from app.dsp.tow_detect import detect_measurement_tow
 
-        tow = detect_measurement_tow(source, sample_rate_hz=sample_rate_hz, compute_backend=backend)
+        tow = detect_measurement_tow(
+            source,
+            sample_rate_hz=sample_rate_hz,
+            compute_backend=backend,
+            max_workers=workers,
+        )
     except Exception:
         tow = None
     if tow is not None:

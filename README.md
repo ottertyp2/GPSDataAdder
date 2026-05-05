@@ -47,6 +47,8 @@ Use `Detect` before `Start` when you want to see the exact plan first.
 
 The detect mode does not write an output file. It inspects the input recording, picks a deterministic synthetic PRN/code-phase/Doppler plan from the file fingerprint, estimates a realistic amplitude, tries to determine the measurement TOW from LNAV HOW, resolves the compute backend, and writes the proposed values into the GUI fields.
 
+For long recordings, Detect uses the sibling `Fraunhofer_FHR` project first when it is available at `..\Fraunhofer_FHR` or through `FRAUNHOFER_FHR_PATH`. The fast TOW path reuses its acquisition, tracking, and navigation-decoding stages, but avoids the full PVT solve: it scans a short window around 60 seconds, tracks only the strongest candidates for about 18 seconds, and stops as soon as a valid HOW/TOW subframe is decoded. `Auto` uses the CuPy/CUDA path when available. On the local `testv4_28_04_26_10min.bin` recording this returns a plan in about 12 seconds instead of timing out in the full PVT pipeline.
+
 When a measurement TOW is found, `Start TOW count` and `Start subframe ID` are set so the synthetic LNAV HOW imitates the timing of the source recording. If TOW is not recoverable from the capture, Detect says so and keeps the deterministic default.
 
 Modes:
@@ -56,6 +58,8 @@ Modes:
 - `Strong`: easier decoder sanity check while still tied to the input level
 
 After detect, `Auto amplitude` is disabled and the detected fixed amplitude is shown, so `Start` uses the visible value.
+
+Set `GPSDATAADDER_FULL_PVT_FALLBACK=1` only when you deliberately want the slower full Fraunhofer PVT fallback after the fast TOW path fails.
 
 ## Automatic Amplitude
 

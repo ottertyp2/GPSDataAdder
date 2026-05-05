@@ -51,7 +51,7 @@ Agents working here should preserve the project's core priorities:
 
 - `app/main.py`: GUI entry point and optional command-line mode
 - `app/gui/`: main window and worker thread plumbing
-- `app/dsp/`: PRN generation, LNAV bit generation, synthetic channel generation, and file mixing
+- `app/dsp/`: PRN generation, LNAV bit generation, fast Fraunhofer-assisted TOW detection, synthetic channel generation, and file mixing
 - `app/tests/`: unit and smoke tests
 - `tools/check_git_sync.ps1`: quick check for branch, status, and dual-push remote setup
 

@@ -104,7 +104,6 @@ class MainWindow(QMainWindow):
                 color: #f8fafc;
                 font-size: 20pt;
                 font-weight: 800;
-                letter-spacing: 1px;
             }
             QLabel#headerState {
                 color: #94a3b8;
@@ -273,7 +272,7 @@ class MainWindow(QMainWindow):
         input_button = QPushButton()
         input_button.setObjectName("iconButton")
         input_button.setIcon(self._standard_icon(QStyle.SP_DialogOpenButton))
-        input_button.setToolTip("Eingabedatei auswählen")
+        input_button.setToolTip("Eingabedatei waehlen")
         input_button.clicked.connect(self._choose_input)
 
         self.output_edit = QLineEdit()
@@ -282,7 +281,7 @@ class MainWindow(QMainWindow):
         output_button = QPushButton()
         output_button.setObjectName("iconButton")
         output_button.setIcon(self._standard_icon(QStyle.SP_DialogSaveButton))
-        output_button.setToolTip("Ausgabedatei auswählen")
+        output_button.setToolTip("Ausgabedatei waehlen")
         output_button.clicked.connect(self._choose_output)
 
         self.file_info_label = QLabel("Keine Datei geladen.")
@@ -467,7 +466,7 @@ class MainWindow(QMainWindow):
     def _choose_input(self) -> None:
         path, _filter = QFileDialog.getOpenFileName(
             self,
-            "Input auswählen",
+            "Input waehlen",
             "",
             "IQ files (*.bin *.dat *.iq);;All files (*.*)",
         )
@@ -477,7 +476,7 @@ class MainWindow(QMainWindow):
     def _choose_output(self) -> None:
         path, _filter = QFileDialog.getSaveFileName(
             self,
-            "Output auswählen",
+            "Output waehlen",
             "",
             "IQ files (*.bin *.dat *.iq);;All files (*.*)",
         )
@@ -565,17 +564,18 @@ class MainWindow(QMainWindow):
         self.detect_worker.failed.connect(self._detect_failed)
         self._set_detecting(True)
         self.status_label.setText("Detect laeuft.")
-        self.header_state_label.setText("⏳ Detecting…")
+        self.header_state_label.setText("Detecting")
+        self.plan_summary.setText("Detecting: analysing input level, signal plan, and Fraunhofer_FHR TOW.")
         self.detect_worker.start()
 
     def _start(self) -> None:
         input_text = self.input_edit.text().strip()
         output_text = self.output_edit.text().strip()
         if not input_text:
-            QMessageBox.warning(self, "Input", "Bitte eine Eingabedatei wählen.")
+            QMessageBox.warning(self, "Input", "Bitte eine Eingabedatei waehlen.")
             return
         if not output_text:
-            QMessageBox.warning(self, "Output", "Bitte eine Ausgabedatei wählen.")
+            QMessageBox.warning(self, "Output", "Bitte eine Ausgabedatei waehlen.")
             return
         input_path = Path(input_text)
         output_path = Path(output_text)
@@ -583,13 +583,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Input", "Die Eingabedatei existiert nicht.")
             return
         if input_path.resolve() == output_path.resolve():
-            QMessageBox.warning(self, "Output", "Input und Output müssen verschieden sein.")
+            QMessageBox.warning(self, "Output", "Input und Output muessen verschieden sein.")
             return
         if output_path.exists():
             choice = QMessageBox.question(
                 self,
-                "Output überschreiben",
-                "Die Ausgabedatei existiert bereits. Überschreiben?",
+                "Output ueberschreiben",
+                "Die Ausgabedatei existiert bereits. Ueberschreiben?",
             )
             if choice != QMessageBox.Yes:
                 return
@@ -614,8 +614,8 @@ class MainWindow(QMainWindow):
         self.worker.failed.connect(self._failed)
 
         self.progress.setValue(0)
-        self.status_label.setText("Läuft.")
-        self.header_state_label.setText("⏳ Processing…")
+        self.status_label.setText("Laeuft.")
+        self.header_state_label.setText("Processing")
         self._append_log(f"Input: {input_path}")
         self._append_log(f"Output: {output_path}")
         self._set_running(True)
@@ -636,7 +636,7 @@ class MainWindow(QMainWindow):
     def _detect_finished(self, result: object) -> None:
         self._set_detecting(False)
         self.status_label.setText("Detect fertig.")
-        self.header_state_label.setText("✅ Plan ready")
+        self.header_state_label.setText("Plan ready")
         plan = result
         self.prn_spin.setValue(int(getattr(plan, "prn")))
         self.doppler_spin.setValue(float(getattr(plan, "doppler_hz")))
@@ -666,7 +666,8 @@ class MainWindow(QMainWindow):
     def _detect_failed(self, message: str) -> None:
         self._set_detecting(False)
         self.status_label.setText("Detect Fehler.")
-        self.header_state_label.setText("❌ Detect failed")
+        self.header_state_label.setText("Detect failed")
+        self.plan_summary.setText("Detect failed. Details are in the log.")
         self._append_log(message)
         QMessageBox.critical(self, "Detect Fehler", message)
         self.detect_worker = None
@@ -674,7 +675,7 @@ class MainWindow(QMainWindow):
     def _finished(self, result: object) -> None:
         self._set_running(False)
         self.status_label.setText("Fertig.")
-        self.header_state_label.setText("✅ Done")
+        self.header_state_label.setText("Done")
         self._append_log(f"Fertig: {getattr(result, 'output_path', '')}")
         self._append_log(f"Samples: {getattr(result, 'total_samples', '')}")
         self._append_log(f"Signature: {getattr(result, 'synthetic_signature_id', '')}")
@@ -699,13 +700,13 @@ class MainWindow(QMainWindow):
         self._set_running(False)
         self.progress.setValue(0)
         self.status_label.setText("Abgebrochen.")
-        self.header_state_label.setText("⚠ Cancelled")
+        self.header_state_label.setText("Cancelled")
         self.worker = None
 
     def _failed(self, message: str) -> None:
         self._set_running(False)
         self.status_label.setText("Fehler.")
-        self.header_state_label.setText("❌ Error")
+        self.header_state_label.setText("Error")
         self._append_log(message)
         QMessageBox.critical(self, "Fehler", message)
         self.worker = None
@@ -781,8 +782,8 @@ class MainWindow(QMainWindow):
         if self.worker is not None and self.worker.isRunning():
             choice = QMessageBox.question(
                 self,
-                "Verarbeitung läuft",
-                "Die Verarbeitung läuft noch. Abbrechen und schließen?",
+                "Verarbeitung laeuft",
+                "Die Verarbeitung laeuft noch. Abbrechen und schliessen?",
             )
             if choice != QMessageBox.Yes:
                 event.ignore()

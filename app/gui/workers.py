@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import traceback
 from pathlib import Path
+from time import perf_counter
 
 from PySide6.QtCore import QThread, Signal
 
@@ -121,6 +122,11 @@ class DetectPlanWorker(QThread):
     def run(self) -> None:
         try:
             self.message.emit(f"Detect: analysiere {self.input_path.name}.")
+            self.message.emit(
+                f"Detect: mode {self.mode}, backend {self.requested_backend}, "
+                f"chunk {self.chunk_samples:,} samples."
+            )
+            start_time = perf_counter()
             plan: DetectedSignalPlan = detect_synthetic_signal_plan(
                 self.input_path,
                 sample_rate_hz=self.sample_rate_hz,
@@ -130,6 +136,8 @@ class DetectPlanWorker(QThread):
                 in_flight_blocks=self.in_flight_blocks,
                 chunk_samples=self.chunk_samples,
             )
+            elapsed_s = perf_counter() - start_time
+            self.message.emit(f"Detect: fertig in {elapsed_s:.1f} s.")
             self.succeeded.emit(plan)
         except Exception as exc:
             detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
