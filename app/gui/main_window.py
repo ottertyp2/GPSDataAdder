@@ -9,6 +9,7 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -29,12 +30,14 @@ from PySide6.QtWidgets import (
 )
 
 from app.dsp.synthetic_satellite import (
+    DEFAULT_CHUNK_SAMPLES,
     DEFAULT_SAMPLE_RATE_HZ,
+    DEFAULT_WORKER_COUNT,
     SyntheticSatelliteConfig,
     count_complex64_samples,
     default_output_path,
 )
-from app.gui.workers import AddSyntheticWorker
+from app.gui.workers import AddSyntheticWorker, DetectPlanWorker
 
 
 class MainWindow(QMainWindow):
@@ -45,6 +48,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("GPSDataAdder")
         self.resize(920, 680)
         self.worker: AddSyntheticWorker | None = None
+        self.detect_worker: DetectPlanWorker | None = None
         self._output_auto = True
 
         root = QWidget()
@@ -154,7 +158,25 @@ class MainWindow(QMainWindow):
         self.chunk_spin = QSpinBox()
         self.chunk_spin.setRange(50_000, 20_000_000)
         self.chunk_spin.setSingleStep(250_000)
-        self.chunk_spin.setValue(1_000_000)
+        self.chunk_spin.setValue(DEFAULT_CHUNK_SAMPLES)
+
+        self.backend_combo = QComboBox()
+        self.backend_combo.addItem("Auto", "auto")
+        self.backend_combo.addItem("CPU", "cpu")
+        self.backend_combo.addItem("GPU", "gpu")
+        self.backend_combo.setToolTip("Auto uses CuPy/CUDA when available and falls back to CPU.")
+
+        self.workers_spin = QSpinBox()
+        self.workers_spin.setRange(0, 64)
+        self.workers_spin.setSpecialValueText("Auto")
+        self.workers_spin.setValue(0)
+        self.workers_spin.setToolTip(f"CPU worker count. Auto is currently {DEFAULT_WORKER_COUNT}.")
+
+        self.inflight_spin = QSpinBox()
+        self.inflight_spin.setRange(0, 128)
+        self.inflight_spin.setSpecialValueText("Auto")
+        self.inflight_spin.setValue(0)
+        self.inflight_spin.setToolTip("Maximum queued processing blocks. Auto is 2x workers.")
 
         form_left = QFormLayout()
         form_left.addRow("Sample rate", self.sample_rate_spin)
@@ -169,6 +191,9 @@ class MainWindow(QMainWindow):
         form_right.addRow("Carrier phase deg", self.carrier_phase_spin)
         form_right.addRow("Start TOW count", self.tow_spin)
         form_right.addRow("Chunk samples", self.chunk_spin)
+        form_right.addRow("Compute backend", self.backend_combo)
+        form_right.addRow("CPU workers", self.workers_spin)
+        form_right.addRow("In-flight blocks", self.inflight_spin)
         form_right.addRow("Nav seed", self.seed_spin)
 
         grid.addLayout(form_left, 0, 0)
@@ -185,6 +210,14 @@ class MainWindow(QMainWindow):
         controls = QHBoxLayout()
         self.metadata_check = QCheckBox("Metadata JSON")
         self.metadata_check.setChecked(True)
+        self.detect_mode_combo = QComboBox()
+        self.detect_mode_combo.addItem("Balanced", "balanced")
+        self.detect_mode_combo.addItem("Weak", "weak")
+        self.detect_mode_combo.addItem("Strong", "strong")
+        self.detect_mode_combo.setToolTip("Detect mode sets the target C/N0 before generating the plan.")
+        self.detect_button = QPushButton("Detect")
+        self.detect_button.setIcon(self._standard_icon(QStyle.SP_FileDialogContentsView))
+        self.detect_button.clicked.connect(self._detect)
         self.start_button = QPushButton("Start")
         self.start_button.setIcon(self._standard_icon(QStyle.SP_MediaPlay))
         self.start_button.clicked.connect(self._start)
@@ -193,6 +226,9 @@ class MainWindow(QMainWindow):
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self._cancel)
         controls.addWidget(self.metadata_check)
+        controls.addWidget(QLabel("Mode"))
+        controls.addWidget(self.detect_mode_combo)
+        controls.addWidget(self.detect_button)
         controls.addStretch(1)
         controls.addWidget(self.start_button)
         controls.addWidget(self.cancel_button)
@@ -279,6 +315,42 @@ class MainWindow(QMainWindow):
             nav_seed=int(self.seed_spin.value()),
         )
 
+    def _requested_backend(self) -> str:
+        return str(self.backend_combo.currentData())
+
+    def _worker_count(self) -> int | None:
+        value = self.workers_spin.value()
+        return None if value <= 0 else int(value)
+
+    def _in_flight_blocks(self) -> int | None:
+        value = self.inflight_spin.value()
+        return None if value <= 0 else int(value)
+
+    def _detect(self) -> None:
+        input_text = self.input_edit.text().strip()
+        if not input_text:
+            QMessageBox.warning(self, "Input", "Bitte eine Eingabedatei waehlen.")
+            return
+        input_path = Path(input_text)
+        if not input_path.exists():
+            QMessageBox.warning(self, "Input", "Die Eingabedatei existiert nicht.")
+            return
+        self.detect_worker = DetectPlanWorker(
+            input_path=input_path,
+            sample_rate_hz=float(self.sample_rate_spin.value()),
+            mode=str(self.detect_mode_combo.currentData()),
+            requested_backend=self._requested_backend(),
+            worker_count=self._worker_count(),
+            in_flight_blocks=self._in_flight_blocks(),
+            chunk_samples=int(self.chunk_spin.value()),
+        )
+        self.detect_worker.message.connect(self._append_log)
+        self.detect_worker.succeeded.connect(self._detect_finished)
+        self.detect_worker.failed.connect(self._detect_failed)
+        self._set_detecting(True)
+        self.status_label.setText("Detect laeuft.")
+        self.detect_worker.start()
+
     def _start(self) -> None:
         input_text = self.input_edit.text().strip()
         output_text = self.output_edit.text().strip()
@@ -314,6 +386,9 @@ class MainWindow(QMainWindow):
             metadata_path,
             self.auto_amplitude_check.isChecked(),
             self.target_cn0_spin.value(),
+            self._requested_backend(),
+            self._worker_count(),
+            self._in_flight_blocks(),
         )
         self.worker.progress_changed.connect(self._set_progress)
         self.worker.message.connect(self._append_log)
@@ -340,6 +415,38 @@ class MainWindow(QMainWindow):
     def _append_log(self, message: str) -> None:
         self.log.appendPlainText(message)
 
+    def _detect_finished(self, result: object) -> None:
+        self._set_detecting(False)
+        self.status_label.setText("Detect fertig.")
+        plan = result
+        self.prn_spin.setValue(int(getattr(plan, "prn")))
+        self.doppler_spin.setValue(float(getattr(plan, "doppler_hz")))
+        self.code_phase_spin.setValue(int(getattr(plan, "code_phase_samples")))
+        self.carrier_phase_spin.setValue(float(getattr(plan, "carrier_phase_deg")))
+        self.target_cn0_spin.setValue(float(getattr(plan, "target_cn0_dbhz")))
+        self.amplitude_spin.setValue(float(getattr(plan, "amplitude")))
+        self.auto_amplitude_check.setChecked(False)
+        self.chunk_spin.setValue(int(getattr(plan, "chunk_samples")))
+        self.workers_spin.setValue(int(getattr(plan, "worker_count")))
+        self.inflight_spin.setValue(int(getattr(plan, "in_flight_blocks")))
+        backend = str(getattr(plan, "compute_backend"))
+        for index in range(self.backend_combo.count()):
+            if self.backend_combo.itemData(index) == backend:
+                self.backend_combo.setCurrentIndex(index)
+                break
+        self._append_log("Detect plan:")
+        for line in getattr(plan, "summary_lines"):
+            self._append_log(f"  {line}")
+        self._append_log("Start uses the visible fixed amplitude. Run Detect again after changing the input or sample rate.")
+        self.detect_worker = None
+
+    def _detect_failed(self, message: str) -> None:
+        self._set_detecting(False)
+        self.status_label.setText("Detect Fehler.")
+        self._append_log(message)
+        QMessageBox.critical(self, "Detect Fehler", message)
+        self.detect_worker = None
+
     def _finished(self, result: object) -> None:
         self._set_running(False)
         self.status_label.setText("Fertig.")
@@ -347,6 +454,11 @@ class MainWindow(QMainWindow):
         self._append_log(f"Samples: {getattr(result, 'total_samples', '')}")
         self._append_log(f"Signature: {getattr(result, 'synthetic_signature_id', '')}")
         self._append_log(f"Amplitude: {getattr(result, 'effective_amplitude', '')}")
+        self._append_log(
+            f"Compute: {getattr(result, 'compute_backend', '')}, "
+            f"workers {getattr(result, 'worker_count', '')}, "
+            f"in-flight {getattr(result, 'in_flight_blocks', '')}"
+        )
         amplitude_estimate = getattr(result, "amplitude_estimate", None)
         if amplitude_estimate is not None:
             self._append_log(
@@ -388,6 +500,11 @@ class MainWindow(QMainWindow):
             self.tow_spin,
             self.seed_spin,
             self.chunk_spin,
+            self.backend_combo,
+            self.workers_spin,
+            self.inflight_spin,
+            self.detect_mode_combo,
+            self.detect_button,
             self.metadata_check,
         ):
             widget.setEnabled(not running)
@@ -397,10 +514,41 @@ class MainWindow(QMainWindow):
     def _update_amplitude_controls(self) -> None:
         auto_enabled = self.auto_amplitude_check.isChecked()
         ui_enabled = not (self.worker is not None and self.worker.isRunning())
+        ui_enabled = ui_enabled and not (self.detect_worker is not None and self.detect_worker.isRunning())
         self.amplitude_spin.setEnabled(ui_enabled and not auto_enabled)
         self.target_cn0_spin.setEnabled(ui_enabled and auto_enabled)
 
+    def _set_detecting(self, detecting: bool) -> None:
+        self.detect_button.setEnabled(not detecting)
+        self.start_button.setEnabled(not detecting)
+        self.cancel_button.setEnabled(False)
+        for widget in (
+            self.input_edit,
+            self.output_edit,
+            self.sample_rate_spin,
+            self.prn_spin,
+            self.doppler_spin,
+            self.code_phase_spin,
+            self.amplitude_spin,
+            self.auto_amplitude_check,
+            self.target_cn0_spin,
+            self.carrier_phase_spin,
+            self.tow_spin,
+            self.seed_spin,
+            self.chunk_spin,
+            self.backend_combo,
+            self.workers_spin,
+            self.inflight_spin,
+            self.detect_mode_combo,
+            self.metadata_check,
+        ):
+            widget.setEnabled(not detecting)
+        if not detecting:
+            self._update_amplitude_controls()
+
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self.detect_worker is not None and self.detect_worker.isRunning():
+            self.detect_worker.wait(3000)
         if self.worker is not None and self.worker.isRunning():
             choice = QMessageBox.question(
                 self,

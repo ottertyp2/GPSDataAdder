@@ -7,10 +7,12 @@ from pathlib import Path
 import sys
 
 from app.dsp.synthetic_satellite import (
+    DEFAULT_CHUNK_SAMPLES,
     DEFAULT_SAMPLE_RATE_HZ,
     DEFAULT_TARGET_CN0_DBHZ,
     SyntheticSatelliteConfig,
     add_synthetic_satellite_to_file,
+    detect_synthetic_signal_plan,
     default_output_path,
 )
 
@@ -97,8 +99,37 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--chunk-samples",
         type=_positive_float,
-        default=1_000_000,
+        default=DEFAULT_CHUNK_SAMPLES,
         help="Processing chunk size in complex samples.",
+    )
+    parser.add_argument(
+        "--compute-backend",
+        choices=("auto", "cpu", "gpu"),
+        default="auto",
+        help="Compute backend. Auto uses GPU when CuPy/CUDA is available.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=_non_negative_int,
+        default=0,
+        help="CPU worker count. 0 chooses an automatic value.",
+    )
+    parser.add_argument(
+        "--in-flight-blocks",
+        type=_non_negative_int,
+        default=0,
+        help="Maximum queued processing blocks. 0 chooses an automatic value.",
+    )
+    parser.add_argument(
+        "--detect-only",
+        action="store_true",
+        help="Inspect the input and print a signal plan without writing output.",
+    )
+    parser.add_argument(
+        "--detect-mode",
+        choices=("weak", "balanced", "strong"),
+        default="balanced",
+        help="Detect-only target strength mode.",
     )
     parser.add_argument(
         "--metadata-out",
@@ -121,6 +152,21 @@ def run_cli(argv: list[str] | None = None) -> int:
     metadata_path = None
     if not args.no_metadata:
         metadata_path = Path(args.metadata_out) if args.metadata_out else output_path.with_suffix(output_path.suffix + ".synthetic.json")
+
+    if args.detect_only:
+        plan = detect_synthetic_signal_plan(
+            input_path,
+            sample_rate_hz=float(args.sample_rate),
+            mode=str(args.detect_mode),
+            requested_backend=str(args.compute_backend),
+            worker_count=None if int(args.workers) <= 0 else int(args.workers),
+            in_flight_blocks=None if int(args.in_flight_blocks) <= 0 else int(args.in_flight_blocks),
+            chunk_samples=int(args.chunk_samples),
+        )
+        print("Detect plan:")
+        for line in plan.summary_lines:
+            print(f"  {line}")
+        return 0
 
     config = SyntheticSatelliteConfig(
         sample_rate_hz=float(args.sample_rate),
@@ -145,12 +191,16 @@ def run_cli(argv: list[str] | None = None) -> int:
         progress_callback=report,
         auto_amplitude=bool(args.auto_amplitude),
         target_cn0_dbhz=float(args.target_cn0_dbhz),
+        compute_backend=str(args.compute_backend),
+        worker_count=None if int(args.workers) <= 0 else int(args.workers),
+        in_flight_blocks=None if int(args.in_flight_blocks) <= 0 else int(args.in_flight_blocks),
     )
 
     print(f"Wrote {result.output_path}")
     print(f"Samples: {result.total_samples}")
     print(f"Duration: {result.duration_s:.3f} s")
     print(f"Amplitude: {result.effective_amplitude:.9g} ({result.amplitude_mode})")
+    print(f"Compute: {result.compute_backend}, workers {result.worker_count}, in-flight {result.in_flight_blocks}")
     if result.amplitude_estimate is not None:
         estimate = result.amplitude_estimate
         print(f"Input RMS: {estimate.input_rms:.9g}")

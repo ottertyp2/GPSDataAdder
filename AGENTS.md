@@ -39,6 +39,8 @@ Agents working here should preserve the project's core priorities:
 - readable GPS L1 C/A DSP implementation
 - responsive PySide6 GUI for large local recordings
 - realistic auto-amplitude estimation from local IQ recordings
+- detect-first parameter planning before writing augmented files
+- blockwise memmap processing with CPU parallelism and optional GPU fallback
 - deterministic synthetic PRN, navigation-bit, carrier, and metadata generation
 - windowed/chunked processing so large recordings do not need to fit into RAM
 - compatibility with the Fraunhofer_FHR decoder baseline format: little-endian `complex64`

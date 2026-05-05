@@ -11,6 +11,7 @@ from app.dsp.lnav import build_lnav_bit_stream
 from app.dsp.synthetic_satellite import (
     SyntheticSatelliteConfig,
     add_synthetic_satellite_to_file,
+    detect_synthetic_signal_plan,
     estimate_realistic_amplitude,
     generate_synthetic_satellite_block,
 )
@@ -45,6 +46,7 @@ def test_file_augmentation_writes_complex64_output_and_metadata(tmp_path) -> Non
         config,
         chunk_samples=4096,
         metadata_path=metadata_path,
+        compute_backend="cpu",
     )
     augmented = np.fromfile(output_path, dtype=np.complex64)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -55,6 +57,7 @@ def test_file_augmentation_writes_complex64_output_and_metadata(tmp_path) -> Non
     assert np.max(np.abs(augmented)) == pytest.approx(config.amplitude)
     assert metadata["config"]["prn"] == 5
     assert metadata["amplitude_mode"] == "manual"
+    assert metadata["processing"]["compute_backend"] == "cpu"
     assert metadata["synthetic_signature_id"] == result.synthetic_signature_id
 
 
@@ -90,6 +93,7 @@ def test_file_augmentation_can_use_auto_amplitude(tmp_path) -> None:
         metadata_path=metadata_path,
         auto_amplitude=True,
         target_cn0_dbhz=40.0,
+        compute_backend="cpu",
     )
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
 
@@ -98,6 +102,75 @@ def test_file_augmentation_can_use_auto_amplitude(tmp_path) -> None:
     assert result.amplitude_estimate is not None
     assert metadata["amplitude_mode"] == "auto"
     assert metadata["config"]["amplitude"] == pytest.approx(0.1)
+
+
+def test_parallel_cpu_output_matches_single_worker(tmp_path) -> None:
+    input_path = tmp_path / "input.bin"
+    one_path = tmp_path / "one.bin"
+    many_path = tmp_path / "many.bin"
+    rng = np.random.default_rng(11)
+    original = (
+        rng.normal(0.0, 0.2, 30_000).astype(np.float32)
+        + 1j * rng.normal(0.0, 0.2, 30_000).astype(np.float32)
+    ).astype(np.complex64)
+    original.tofile(input_path)
+    config = SyntheticSatelliteConfig(sample_rate_hz=1_023_000.0, prn=11, doppler_hz=-750.0, amplitude=0.03)
+
+    add_synthetic_satellite_to_file(
+        input_path,
+        one_path,
+        config,
+        chunk_samples=4096,
+        compute_backend="cpu",
+        worker_count=1,
+        in_flight_blocks=1,
+    )
+    result = add_synthetic_satellite_to_file(
+        input_path,
+        many_path,
+        config,
+        chunk_samples=4096,
+        compute_backend="cpu",
+        worker_count=3,
+        in_flight_blocks=2,
+    )
+
+    np.testing.assert_array_equal(np.fromfile(one_path, dtype=np.complex64), np.fromfile(many_path, dtype=np.complex64))
+    assert result.compute_backend == "cpu"
+    assert result.worker_count == 3
+    assert result.in_flight_blocks == 2
+
+
+def test_detect_signal_plan_is_deterministic_and_populates_parameters(tmp_path) -> None:
+    input_path = tmp_path / "capture.bin"
+    np.full(25_000, 0.6 + 0.8j, dtype=np.complex64).tofile(input_path)
+
+    first = detect_synthetic_signal_plan(
+        input_path,
+        sample_rate_hz=1_000_000.0,
+        mode="balanced",
+        requested_backend="cpu",
+        worker_count=2,
+        in_flight_blocks=4,
+        chunk_samples=5000,
+    )
+    second = detect_synthetic_signal_plan(
+        input_path,
+        sample_rate_hz=1_000_000.0,
+        mode="balanced",
+        requested_backend="cpu",
+        worker_count=2,
+        in_flight_blocks=4,
+        chunk_samples=5000,
+    )
+
+    assert first == second
+    assert 1 <= first.prn <= 32
+    assert first.amplitude == pytest.approx(10 ** ((42.0 - 60.0) / 20.0))
+    assert first.compute_backend == "cpu"
+    assert first.worker_count == 2
+    assert first.in_flight_blocks == 4
+    assert len(first.summary_lines) == 4
 
 
 def test_input_and_output_must_differ(tmp_path) -> None:

@@ -12,6 +12,7 @@ The tool is meant for testing the `Fraunhofer_FHR` GPS decoder against controlle
 - plausible TLM preamble and HOW subframe IDs cycling through `1..5`
 - configurable Doppler, code phase, carrier phase, and amplitude
 - automatic amplitude estimation from the input IQ level using a target `C/N0`
+- detect-first planning for PRN, Doppler, code phase, amplitude, and compute settings
 - JSON metadata describing the exact synthetic signature that was added
 
 The payload is synthetic and deterministic. It is useful for acquisition, tracking, bit sync, preamble detection, and parity checks, but it is not real broadcast ephemeris.
@@ -33,10 +34,26 @@ python -m app.main
 The GUI is the default entry point. It is built for large local recordings:
 
 - processing runs in a worker thread so the window stays responsive
-- samples are streamed in chunks instead of loading the full file into RAM
+- samples are processed through memory-mapped blocks so 10-minute files do not need full RAM copies
+- CPU processing uses multiple worker threads by default
+- optional `GPU` backend uses CuPy/CUDA when installed; `Auto` falls back to CPU
 - progress and cancel are available during long 10-minute recordings
 - output is written to a temporary `.partial` file and moved into place only after success
 - `Auto amplitude` estimates the input RMS from several windows and chooses a GPS-like level
+
+## Detect First
+
+Use `Detect` before `Start` when you want to see the exact plan first.
+
+The detect mode does not write an output file. It inspects the input recording, picks a deterministic synthetic PRN/code-phase/Doppler plan from the file fingerprint, estimates a realistic amplitude, resolves the compute backend, and writes the proposed values into the GUI fields.
+
+Modes:
+
+- `Weak`: lower target level, useful for sensitivity testing
+- `Balanced`: default realistic level
+- `Strong`: easier decoder sanity check while still tied to the input level
+
+After detect, `Auto amplitude` is disabled and the detected fixed amplitude is shown, so `Start` uses the visible value.
 
 ## Automatic Amplitude
 
@@ -52,6 +69,12 @@ Use manual amplitude only when you want a deliberately strong or weak stress cas
 python -m app.main --cli input.bin output_with_synthetic_prn.bin --sample-rate 6060606.0606 --prn 22 --doppler-hz 1800 --code-phase-samples 350 --auto-amplitude
 ```
 
+Detect-only CLI:
+
+```powershell
+python -m app.main --cli input.bin --detect-only --detect-mode balanced --sample-rate 6060606.0606
+```
+
 Useful defaults match the local decoder workflow:
 
 - input/output format: little-endian `complex64`
@@ -61,7 +84,9 @@ Useful defaults match the local decoder workflow:
 - default code phase: `350 samples`
 - default auto amplitude target: `42 dB-Hz`
 - default manual amplitude: `0.05`
-- default chunk size: `1,000,000 samples`
+- default compute backend: `auto`
+- default chunk size: `4,000,000 samples`
+- default CPU workers: automatic, up to logical cores minus one
 
 If no output path is supplied, the tool writes next to the input file using a name like:
 
