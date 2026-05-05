@@ -27,6 +27,7 @@ DEFAULT_CHUNK_SAMPLES = 4_000_000
 DEFAULT_WORKER_COUNT = max(1, (os.cpu_count() or 2) - 1)
 DEFAULT_IN_FLIGHT_BLOCKS = DEFAULT_WORKER_COUNT * 2
 COMPUTE_BACKENDS = ("auto", "cpu", "gpu")
+MAX_NAV_SEED = 2_147_483_647
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,7 @@ class DetectedSignalPlan:
     chunk_samples: int
     start_tow_count: int
     start_subframe_id: int
+    nav_seed: int
     measurement_tow_count: int | None
     measurement_tow_seconds: int | None
     tow_source: str
@@ -501,6 +503,24 @@ def _file_fingerprint(path: Path, total_samples: int) -> bytes:
     return hasher.digest()
 
 
+def _derive_detected_nav_seed(
+    fingerprint: bytes,
+    start_tow_count: int,
+    start_subframe_id: int,
+    measurement_tow_count: int | None,
+    detected_nav_seed: int | None,
+) -> int:
+    if detected_nav_seed is not None:
+        return max(0, min(MAX_NAV_SEED, int(detected_nav_seed)))
+    hasher = hashlib.sha256()
+    hasher.update(b"GPSDataAdder detected nav seed v1")
+    hasher.update(fingerprint)
+    for value in (start_tow_count, start_subframe_id, measurement_tow_count):
+        hasher.update(str(value).encode("ascii"))
+        hasher.update(b"|")
+    return int.from_bytes(hasher.digest()[:4], "big", signed=False) & MAX_NAV_SEED
+
+
 def detect_synthetic_signal_plan(
     input_path: str | Path,
     sample_rate_hz: float,
@@ -542,6 +562,7 @@ def detect_synthetic_signal_plan(
     measurement_tow_seconds = None
     start_tow_count = 100
     start_subframe_id = 1
+    detected_nav_seed = None
     tow_source = "not detected"
     try:
         from app.dsp.tow_detect import detect_measurement_tow
@@ -565,15 +586,24 @@ def detect_synthetic_signal_plan(
         )
         if not (1 <= start_subframe_id <= 5):
             start_subframe_id = 1
+        detected_nav_seed = tow.synthetic_nav_seed
         tow_source = (
             f"{tow.source}: PRN {tow.prn}, TOW {tow.tow_seconds}s "
             f"(count {tow.tow_count}), subframe {tow.subframe_id}; "
             f"synthetic start count {start_tow_count}, subframe {start_subframe_id}"
         )
+    nav_seed = _derive_detected_nav_seed(
+        fingerprint,
+        start_tow_count=start_tow_count,
+        start_subframe_id=start_subframe_id,
+        measurement_tow_count=measurement_tow_count,
+        detected_nav_seed=detected_nav_seed,
+    )
     summary = (
         f"Detect mode: {mode.lower().strip()} ({target_cn0:.1f} dB-Hz target).",
         f"Input: {total_samples:,} samples, {duration_s / 60.0:.2f} min, RMS {amplitude_estimate.input_rms:.6g}.",
         f"TOW plan: {tow_source}.",
+        f"Navigation plan: start TOW count {start_tow_count}, subframe {start_subframe_id}, nav seed {nav_seed}.",
         f"Signal plan: PRN {prn}, Doppler {doppler_hz:.0f} Hz, code phase {code_phase_samples} samples, amplitude {amplitude_estimate.amplitude:.6g}.",
         f"Performance plan: {backend} backend, {workers} worker(s), {in_flight} in-flight block(s), chunk {chunk_samples:,} samples.",
     )
@@ -596,6 +626,7 @@ def detect_synthetic_signal_plan(
         chunk_samples=int(chunk_samples),
         start_tow_count=start_tow_count,
         start_subframe_id=start_subframe_id,
+        nav_seed=nav_seed,
         measurement_tow_count=measurement_tow_count,
         measurement_tow_seconds=measurement_tow_seconds,
         tow_source=tow_source,

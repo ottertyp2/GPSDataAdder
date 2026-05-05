@@ -8,6 +8,7 @@ venv/
 *.dat
 *.iq
 *.tmp
+*.partial
 *.log
 *.json
 !.agents/**/*.json

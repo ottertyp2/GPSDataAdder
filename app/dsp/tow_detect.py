@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -54,6 +55,7 @@ class TowDetectionResult:
     source: str
     synthetic_start_tow_count: int | None = None
     synthetic_start_subframe_id: int | None = None
+    synthetic_nav_seed: int | None = None
     file_time_s: float | None = None
 
 
@@ -232,6 +234,8 @@ def _load_sidecar_tow(path: Path) -> TowDetectionResult | None:
         tow_count = int(config["start_tow_count"])
         prn = int(config.get("prn", 0))
         subframe_id = int(config.get("start_subframe_id", 0))
+        raw_nav_seed = config.get("nav_seed")
+        nav_seed = int(raw_nav_seed) if raw_nav_seed is not None else None
     except Exception:
         return None
     return TowDetectionResult(
@@ -248,8 +252,15 @@ def _load_sidecar_tow(path: Path) -> TowDetectionResult | None:
         source="metadata sidecar",
         synthetic_start_tow_count=tow_count,
         synthetic_start_subframe_id=subframe_id if 1 <= subframe_id <= 5 else 1,
+        synthetic_nav_seed=nav_seed,
         file_time_s=0.0,
     )
+
+
+def _nav_seed_from_payload(*parts: object) -> int:
+    material = "|".join(str(part) for part in parts)
+    digest = hashlib.sha256(material.encode("utf-8", errors="replace")).digest()
+    return int.from_bytes(digest[:4], "big", signed=False) & 0x7FFF_FFFF
 
 
 def _fraunhofer_project_path() -> Path | None:
@@ -274,11 +285,19 @@ def _detect_with_fraunhofer_pvt_pipeline(
         return None
 
     script = r"""
+import hashlib
 import json
 import sys
 
 from app.dsp.pvt_pipeline import run_pvt_pipeline
 from app.models import SessionConfig
+
+
+def nav_seed_for_subframe(prn, subframe):
+    words = "".join(getattr(word, "bits", "") for word in getattr(subframe, "words", []))
+    material = f"{int(prn)}|{subframe.tow_seconds}|{subframe.subframe_id}|{words}"
+    digest = hashlib.sha256(material.encode("utf-8", errors="replace")).digest()
+    return int.from_bytes(digest[:4], "big", signed=False) & 0x7fffffff
 
 file_path = sys.argv[1]
 sample_rate = float(sys.argv[2])
@@ -328,6 +347,7 @@ for prn, nav in result.nav_results_by_prn.items():
                 "tracked_ms": int(tracking.times_s.size) if tracking is not None else 0,
                 "synthetic_start_tow_count": int((tow_count - subframe_offset) % (604800 // 6)),
                 "synthetic_start_subframe_id": int(((int(subframe.subframe_id) - 1 - subframe_offset) % 5) + 1),
+                "synthetic_nav_seed": nav_seed_for_subframe(prn, subframe),
                 "source": "Fraunhofer_FHR PVT pipeline",
             }
         )
@@ -349,6 +369,7 @@ elif result.pvt_result.gps_time_of_week_s is not None:
                 "tracked_ms": 0,
                 "synthetic_start_tow_count": tow_count,
                 "synthetic_start_subframe_id": 1,
+                "synthetic_nav_seed": tow_count,
                 "source": "Fraunhofer_FHR PVT solution time",
             },
             sort_keys=True,
@@ -403,6 +424,7 @@ else:
         source=str(payload.get("source", "Fraunhofer_FHR PVT pipeline")),
         synthetic_start_tow_count=int(payload.get("synthetic_start_tow_count", payload["tow_count"])),
         synthetic_start_subframe_id=int(payload.get("synthetic_start_subframe_id", payload["subframe_id"])),
+        synthetic_nav_seed=int(payload["synthetic_nav_seed"]) if payload.get("synthetic_nav_seed") is not None else None,
         file_time_s=float(payload.get("file_time_s", 0.0)),
     )
 
@@ -418,6 +440,7 @@ def _detect_with_fraunhofer_fast_tow_pipeline(
         return None
 
     script = r"""
+import hashlib
 import json
 import sys
 
@@ -426,6 +449,13 @@ from app.dsp.io import Complex64FileSource
 from app.dsp.navdecode import decode_navigation_from_tracking
 from app.dsp.tracking import track_file
 from app.models import SessionConfig
+
+
+def nav_seed_for_subframe(prn, subframe):
+    words = "".join(getattr(word, "bits", "") for word in getattr(subframe, "words", []))
+    material = f"{int(prn)}|{subframe.tow_seconds}|{subframe.subframe_id}|{words}"
+    digest = hashlib.sha256(material.encode("utf-8", errors="replace")).digest()
+    return int.from_bytes(digest[:4], "big", signed=False) & 0x7fffffff
 
 file_path = sys.argv[1]
 sample_rate = float(sys.argv[2])
@@ -516,6 +546,7 @@ for acquisition in candidates:
                 "tracked_ms": int(tracking.times_s.size),
                 "synthetic_start_tow_count": int((tow_count - subframe_offset) % (604800 // 6)),
                 "synthetic_start_subframe_id": int(((int(subframe.subframe_id) - 1 - subframe_offset) % 5) + 1),
+                "synthetic_nav_seed": nav_seed_for_subframe(acquisition.prn, subframe),
                 "source": f"Fraunhofer_FHR fast TOW pipeline ({backend})",
             }
         )
@@ -577,6 +608,7 @@ else:
         source=str(payload.get("source", "Fraunhofer_FHR fast TOW pipeline")),
         synthetic_start_tow_count=int(payload.get("synthetic_start_tow_count", payload["tow_count"])),
         synthetic_start_subframe_id=int(payload.get("synthetic_start_subframe_id", payload["subframe_id"])),
+        synthetic_nav_seed=int(payload["synthetic_nav_seed"]) if payload.get("synthetic_nav_seed") is not None else None,
         file_time_s=float(payload.get("file_time_s", 0.0)),
     )
 
@@ -652,4 +684,5 @@ def detect_measurement_tow(
         polarity=tow.polarity,
         tracked_ms=int(prompt.size),
         source="iq lnav how",
+        synthetic_nav_seed=_nav_seed_from_payload("iq-lnav-how", candidate.prn, tow.tow_count, tow.subframe_id),
     )

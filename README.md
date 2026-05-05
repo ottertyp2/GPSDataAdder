@@ -49,7 +49,7 @@ The detect mode does not write an output file. It inspects the input recording, 
 
 For long recordings, Detect uses the sibling `Fraunhofer_FHR` project first when it is available at `..\Fraunhofer_FHR` or through `FRAUNHOFER_FHR_PATH`. The fast TOW path reuses its acquisition, tracking, and navigation-decoding stages, but avoids the full PVT solve: it scans a short window around 60 seconds, tracks only the strongest candidates for about 18 seconds, and stops as soon as a valid HOW/TOW subframe is decoded. `Auto` uses the CuPy/CUDA path when available. On the local `testv4_28_04_26_10min.bin` recording this returns a plan in about 12 seconds instead of timing out in the full PVT pipeline.
 
-When a measurement TOW is found, `Start TOW count` and `Start subframe ID` are set so the synthetic LNAV HOW imitates the timing of the source recording. If TOW is not recoverable from the capture, Detect says so and keeps the deterministic default.
+When a measurement TOW is found, `Start TOW count`, `Start subframe ID`, and `Nav seed` are set so the synthetic LNAV HOW and deterministic payload pattern are tied to the source recording. If TOW is not recoverable from the capture, Detect says so and still chooses a deterministic file-specific seed from the input fingerprint.
 
 Modes:
 

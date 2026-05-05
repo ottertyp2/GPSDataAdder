@@ -172,8 +172,10 @@ def test_detect_signal_plan_is_deterministic_and_populates_parameters(tmp_path) 
     assert first.in_flight_blocks == 4
     assert first.start_tow_count == 100
     assert first.start_subframe_id == 1
+    assert 0 <= first.nav_seed <= 2_147_483_647
     assert first.tow_source == "not detected"
-    assert len(first.summary_lines) == 5
+    assert len(first.summary_lines) == 6
+    assert "nav seed" in first.summary_lines[3]
 
 
 def test_detect_signal_plan_imitates_measurement_tow_from_sidecar(tmp_path) -> None:
@@ -189,6 +191,7 @@ def test_detect_signal_plan_imitates_measurement_tow_from_sidecar(tmp_path) -> N
                     "prn": 9,
                     "doppler_hz": 1250.0,
                     "code_phase_samples": 99,
+                    "nav_seed": 98765,
                 }
             }
         ),
@@ -207,6 +210,7 @@ def test_detect_signal_plan_imitates_measurement_tow_from_sidecar(tmp_path) -> N
 
     assert plan.start_tow_count == 3456
     assert plan.start_subframe_id == 4
+    assert plan.nav_seed == 98765
     assert plan.measurement_tow_count == 3456
     assert plan.measurement_tow_seconds == 20_736
     assert "metadata sidecar" in plan.tow_source

@@ -644,6 +644,7 @@ class MainWindow(QMainWindow):
         self.carrier_phase_spin.setValue(float(getattr(plan, "carrier_phase_deg")))
         self.tow_spin.setValue(int(getattr(plan, "start_tow_count")))
         self.subframe_spin.setValue(int(getattr(plan, "start_subframe_id")))
+        self.seed_spin.setValue(int(getattr(plan, "nav_seed")))
         self.target_cn0_spin.setValue(float(getattr(plan, "target_cn0_dbhz")))
         self.amplitude_spin.setValue(float(getattr(plan, "amplitude")))
         self.auto_amplitude_check.setChecked(False)
