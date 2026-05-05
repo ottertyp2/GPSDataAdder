@@ -151,6 +151,10 @@ class MainWindow(QMainWindow):
         self.tow_spin.setRange(0, 100_799)
         self.tow_spin.setValue(100)
 
+        self.subframe_spin = QSpinBox()
+        self.subframe_spin.setRange(1, 5)
+        self.subframe_spin.setValue(1)
+
         self.seed_spin = QSpinBox()
         self.seed_spin.setRange(0, 2_147_483_647)
         self.seed_spin.setValue(20260505)
@@ -190,6 +194,7 @@ class MainWindow(QMainWindow):
         form_right.addRow("Target C/N0 dB-Hz", self.target_cn0_spin)
         form_right.addRow("Carrier phase deg", self.carrier_phase_spin)
         form_right.addRow("Start TOW count", self.tow_spin)
+        form_right.addRow("Start subframe ID", self.subframe_spin)
         form_right.addRow("Chunk samples", self.chunk_spin)
         form_right.addRow("Compute backend", self.backend_combo)
         form_right.addRow("CPU workers", self.workers_spin)
@@ -312,6 +317,7 @@ class MainWindow(QMainWindow):
             amplitude=float(self.amplitude_spin.value()),
             carrier_phase_deg=float(self.carrier_phase_spin.value()),
             start_tow_count=int(self.tow_spin.value()),
+            start_subframe_id=int(self.subframe_spin.value()),
             nav_seed=int(self.seed_spin.value()),
         )
 
@@ -423,6 +429,8 @@ class MainWindow(QMainWindow):
         self.doppler_spin.setValue(float(getattr(plan, "doppler_hz")))
         self.code_phase_spin.setValue(int(getattr(plan, "code_phase_samples")))
         self.carrier_phase_spin.setValue(float(getattr(plan, "carrier_phase_deg")))
+        self.tow_spin.setValue(int(getattr(plan, "start_tow_count")))
+        self.subframe_spin.setValue(int(getattr(plan, "start_subframe_id")))
         self.target_cn0_spin.setValue(float(getattr(plan, "target_cn0_dbhz")))
         self.amplitude_spin.setValue(float(getattr(plan, "amplitude")))
         self.auto_amplitude_check.setChecked(False)
@@ -498,6 +506,7 @@ class MainWindow(QMainWindow):
             self.target_cn0_spin,
             self.carrier_phase_spin,
             self.tow_spin,
+            self.subframe_spin,
             self.seed_spin,
             self.chunk_spin,
             self.backend_combo,
@@ -534,6 +543,7 @@ class MainWindow(QMainWindow):
             self.target_cn0_spin,
             self.carrier_phase_spin,
             self.tow_spin,
+            self.subframe_spin,
             self.seed_spin,
             self.chunk_spin,
             self.backend_combo,

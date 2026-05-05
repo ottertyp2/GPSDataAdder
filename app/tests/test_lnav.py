@@ -11,6 +11,7 @@ from app.dsp.lnav import (
     build_lnav_bit_stream,
     check_lnav_word,
     extract_lnav_data_bits,
+    find_lnav_tow,
 )
 
 
@@ -46,6 +47,18 @@ def test_how_subframe_id_cycles() -> None:
         previous_word = bits[start + 9 * LNAV_WORD_BITS : start + 10 * LNAV_WORD_BITS]
 
     assert subframe_ids == [1, 2, 3, 4, 5]
+
+
+def test_lnav_tow_can_be_found_from_hard_bits() -> None:
+    bits = build_lnav_bit_stream(600, start_tow_count=1234, start_subframe_id=3, seed=4)
+
+    estimate = find_lnav_tow(bits)
+
+    assert estimate is not None
+    assert estimate.tow_count == 1234
+    assert estimate.tow_seconds == 7404
+    assert estimate.subframe_id == 3
+    assert estimate.polarity == "normal"
 
 
 def test_lnav_generation_is_deterministic() -> None:

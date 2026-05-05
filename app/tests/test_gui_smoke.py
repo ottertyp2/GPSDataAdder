@@ -22,6 +22,8 @@ def test_main_window_constructs() -> None:
     assert window.auto_amplitude_check.isChecked()
     assert not window.amplitude_spin.isEnabled()
     assert window.target_cn0_spin.value() == 42.0
+    assert window.tow_spin.value() == 100
+    assert window.subframe_spin.value() == 1
     assert window.backend_combo.currentData() == "auto"
     assert window.workers_spin.value() == 0
     assert window.inflight_spin.value() == 0

@@ -40,6 +40,7 @@ Agents working here should preserve the project's core priorities:
 - responsive PySide6 GUI for large local recordings
 - realistic auto-amplitude estimation from local IQ recordings
 - detect-first parameter planning before writing augmented files
+- measurement TOW detection and imitation for synthetic LNAV HOW fields
 - blockwise memmap processing with CPU parallelism and optional GPU fallback
 - deterministic synthetic PRN, navigation-bit, carrier, and metadata generation
 - windowed/chunked processing so large recordings do not need to fit into RAM

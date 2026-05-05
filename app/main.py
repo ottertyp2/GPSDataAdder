@@ -91,6 +91,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Initial LNAV HOW TOW count. One count is 6 seconds.",
     )
     parser.add_argument(
+        "--start-subframe-id",
+        type=int,
+        default=1,
+        choices=(1, 2, 3, 4, 5),
+        help="Initial LNAV subframe ID for the synthetic stream.",
+    )
+    parser.add_argument(
         "--nav-seed",
         type=int,
         default=20260505,
@@ -176,6 +183,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         amplitude=float(args.amplitude),
         carrier_phase_deg=float(args.carrier_phase_deg),
         start_tow_count=int(args.start_tow_count),
+        start_subframe_id=int(args.start_subframe_id),
         nav_seed=int(args.nav_seed),
     )
 

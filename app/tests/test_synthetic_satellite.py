@@ -170,7 +170,46 @@ def test_detect_signal_plan_is_deterministic_and_populates_parameters(tmp_path) 
     assert first.compute_backend == "cpu"
     assert first.worker_count == 2
     assert first.in_flight_blocks == 4
-    assert len(first.summary_lines) == 4
+    assert first.start_tow_count == 100
+    assert first.start_subframe_id == 1
+    assert first.tow_source == "not detected"
+    assert len(first.summary_lines) == 5
+
+
+def test_detect_signal_plan_imitates_measurement_tow_from_sidecar(tmp_path) -> None:
+    input_path = tmp_path / "capture.bin"
+    np.full(25_000, 0.6 + 0.8j, dtype=np.complex64).tofile(input_path)
+    sidecar = input_path.with_suffix(input_path.suffix + ".synthetic.json")
+    sidecar.write_text(
+        json.dumps(
+            {
+                "config": {
+                    "start_tow_count": 3456,
+                    "start_subframe_id": 4,
+                    "prn": 9,
+                    "doppler_hz": 1250.0,
+                    "code_phase_samples": 99,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = detect_synthetic_signal_plan(
+        input_path,
+        sample_rate_hz=1_000_000.0,
+        mode="balanced",
+        requested_backend="cpu",
+        worker_count=2,
+        in_flight_blocks=4,
+        chunk_samples=5000,
+    )
+
+    assert plan.start_tow_count == 3456
+    assert plan.start_subframe_id == 4
+    assert plan.measurement_tow_count == 3456
+    assert plan.measurement_tow_seconds == 20_736
+    assert "metadata sidecar" in plan.tow_source
 
 
 def test_input_and_output_must_differ(tmp_path) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -13,6 +14,19 @@ LNAV_DATA_BITS = 24
 LNAV_SUBFRAME_WORDS = 10
 LNAV_SUBFRAME_BITS = LNAV_WORD_BITS * LNAV_SUBFRAME_WORDS
 MAX_TOW_COUNT = 604_800 // 6
+
+
+@dataclass(frozen=True)
+class LnavTowEstimate:
+    """Decoded TOW estimate from a hard-bit LNAV stream."""
+
+    tow_count: int
+    tow_seconds: int
+    subframe_id: int
+    bit_index: int
+    polarity: str
+    word1_parity_ok: bool
+    word2_parity_ok: bool
 
 
 def _xor_selected(bits: Sequence[int], indices: tuple[int, ...]) -> int:
@@ -88,6 +102,64 @@ def check_lnav_word(word: Sequence[int], previous_word: Sequence[int] | None = N
     return expected == [int(bit) for bit in word[LNAV_DATA_BITS:]]
 
 
+def bits_to_int(bit_values: Sequence[int]) -> int:
+    """Convert an MSB-first bit sequence to an integer."""
+
+    value = 0
+    for bit in bit_values:
+        value = (value << 1) | int(bit)
+    return value
+
+
+def parse_how_tow(word: Sequence[int], previous_word: Sequence[int]) -> tuple[int, int, int] | None:
+    """Decode HOW TOW count, TOW seconds, and subframe ID from one word."""
+
+    if len(word) != LNAV_WORD_BITS or len(previous_word) != LNAV_WORD_BITS:
+        return None
+    data_bits = extract_lnav_data_bits(word, previous_word)
+    tow_count = bits_to_int(data_bits[:17])
+    subframe_id = bits_to_int(data_bits[19:22])
+    if not (0 <= tow_count < MAX_TOW_COUNT and 1 <= subframe_id <= 5):
+        return None
+    return tow_count, tow_count * 6, subframe_id
+
+
+def find_lnav_tow(bit_values: Sequence[int] | np.ndarray) -> LnavTowEstimate | None:
+    """Find a parity-valid LNAV HOW TOW estimate in a hard-bit stream."""
+
+    values = [int(value) for value in bit_values]
+    if len(values) < 2 * LNAV_WORD_BITS:
+        return None
+    preamble = [int(bit) for bit in PREAMBLE]
+    candidates = (("normal", values), ("inverted", [1 - value for value in values]))
+
+    for polarity, stream in candidates:
+        for bit_index in range(0, len(stream) - 2 * LNAV_WORD_BITS + 1):
+            if stream[bit_index : bit_index + len(preamble)] != preamble:
+                continue
+            previous_word = stream[bit_index - LNAV_WORD_BITS : bit_index] if bit_index >= LNAV_WORD_BITS else None
+            word1 = stream[bit_index : bit_index + LNAV_WORD_BITS]
+            word2 = stream[bit_index + LNAV_WORD_BITS : bit_index + 2 * LNAV_WORD_BITS]
+            word1_ok = check_lnav_word(word1, previous_word)
+            word2_ok = check_lnav_word(word2, word1)
+            if not word2_ok:
+                continue
+            how = parse_how_tow(word2, word1)
+            if how is None:
+                continue
+            tow_count, tow_seconds, subframe_id = how
+            return LnavTowEstimate(
+                tow_count=tow_count,
+                tow_seconds=tow_seconds,
+                subframe_id=subframe_id,
+                bit_index=bit_index,
+                polarity=polarity,
+                word1_parity_ok=word1_ok,
+                word2_parity_ok=word2_ok,
+            )
+    return None
+
+
 def _random_payload(rng: np.random.Generator) -> list[int]:
     value = int(rng.integers(0, 1 << LNAV_DATA_BITS, endpoint=False))
     return int_to_bits(value, LNAV_DATA_BITS)
@@ -154,18 +226,21 @@ def build_synthetic_subframe(
 def build_lnav_bit_stream(
     num_bits: int,
     start_tow_count: int = 100,
+    start_subframe_id: int = 1,
     seed: int = 20260505,
 ) -> np.ndarray:
     """Build a deterministic transmitted LNAV bit stream."""
 
     if num_bits < 0:
         raise ValueError("Number of navigation bits must not be negative.")
+    if start_subframe_id < 1 or start_subframe_id > 5:
+        raise ValueError("Start subframe ID must be in the range 1..5.")
     rng = np.random.default_rng(seed)
     stream: list[int] = []
     previous_word: list[int] | None = None
     subframe_index = 0
     while len(stream) < num_bits:
-        subframe_id = (subframe_index % 5) + 1
+        subframe_id = ((int(start_subframe_id) - 1 + subframe_index) % 5) + 1
         tow_count = (int(start_tow_count) + subframe_index) % MAX_TOW_COUNT
         words = build_synthetic_subframe(subframe_id, tow_count, rng, previous_word)
         stream.extend(bit for word in words for bit in word)

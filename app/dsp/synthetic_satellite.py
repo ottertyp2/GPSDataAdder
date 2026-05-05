@@ -39,6 +39,7 @@ class SyntheticSatelliteConfig:
     amplitude: float = 0.05
     carrier_phase_deg: float = 0.0
     start_tow_count: int = 100
+    start_subframe_id: int = 1
     nav_seed: int = 20260505
 
 
@@ -93,6 +94,11 @@ class DetectedSignalPlan:
     worker_count: int
     in_flight_blocks: int
     chunk_samples: int
+    start_tow_count: int
+    start_subframe_id: int
+    measurement_tow_count: int | None
+    measurement_tow_seconds: int | None
+    tow_source: str
     summary_lines: tuple[str, ...]
 
 
@@ -113,6 +119,10 @@ def _validate_config(config: SyntheticSatelliteConfig) -> None:
         raise ValueError("Doppler frequency must be finite.")
     if not np.isfinite(config.carrier_phase_deg):
         raise ValueError("Carrier phase must be finite.")
+    if config.start_tow_count < 0:
+        raise ValueError("Start TOW count must not be negative.")
+    if config.start_subframe_id < 1 or config.start_subframe_id > 5:
+        raise ValueError("Start subframe ID must be in the range 1..5.")
 
 
 def default_output_path(input_path: str | Path, prn: int) -> Path:
@@ -521,9 +531,30 @@ def detect_synthetic_signal_plan(
     code_phase_samples = int((digest_value >> 16) % samples_per_ms)
     carrier_phase_deg = float((digest_value >> 32) % 360)
     duration_s = float(total_samples) / float(sample_rate_hz)
+    measurement_tow_count = None
+    measurement_tow_seconds = None
+    start_tow_count = 100
+    start_subframe_id = 1
+    tow_source = "not detected"
+    try:
+        from app.dsp.tow_detect import detect_measurement_tow
+
+        tow = detect_measurement_tow(source, sample_rate_hz=sample_rate_hz)
+    except Exception:
+        tow = None
+    if tow is not None:
+        measurement_tow_count = int(tow.tow_count)
+        measurement_tow_seconds = int(tow.tow_seconds)
+        start_tow_count = int(tow.tow_count)
+        start_subframe_id = int(tow.subframe_id) if 1 <= int(tow.subframe_id) <= 5 else 1
+        tow_source = (
+            f"{tow.source}: PRN {tow.prn}, TOW {tow.tow_seconds}s "
+            f"(count {tow.tow_count}), subframe {tow.subframe_id}"
+        )
     summary = (
         f"Detect mode: {mode.lower().strip()} ({target_cn0:.1f} dB-Hz target).",
         f"Input: {total_samples:,} samples, {duration_s / 60.0:.2f} min, RMS {amplitude_estimate.input_rms:.6g}.",
+        f"TOW plan: {tow_source}.",
         f"Signal plan: PRN {prn}, Doppler {doppler_hz:.0f} Hz, code phase {code_phase_samples} samples, amplitude {amplitude_estimate.amplitude:.6g}.",
         f"Performance plan: {backend} backend, {workers} worker(s), {in_flight} in-flight block(s), chunk {chunk_samples:,} samples.",
     )
@@ -544,6 +575,11 @@ def detect_synthetic_signal_plan(
         worker_count=workers,
         in_flight_blocks=in_flight,
         chunk_samples=int(chunk_samples),
+        start_tow_count=start_tow_count,
+        start_subframe_id=start_subframe_id,
+        measurement_tow_count=measurement_tow_count,
+        measurement_tow_seconds=measurement_tow_seconds,
+        tow_source=tow_source,
         summary_lines=summary,
     )
 
@@ -564,6 +600,7 @@ def _metadata_payload(
     nav_bits = build_lnav_bit_stream(
         96,
         start_tow_count=config.start_tow_count,
+        start_subframe_id=config.start_subframe_id,
         seed=config.nav_seed,
     )
     return {
@@ -642,6 +679,7 @@ def add_synthetic_satellite_to_file(
         _required_nav_bits(total_samples, effective_config.sample_rate_hz),
         start_tow_count=effective_config.start_tow_count,
         seed=effective_config.nav_seed,
+        start_subframe_id=effective_config.start_subframe_id,
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary_destination = destination.with_name(destination.name + ".partial")

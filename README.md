@@ -12,7 +12,7 @@ The tool is meant for testing the `Fraunhofer_FHR` GPS decoder against controlle
 - plausible TLM preamble and HOW subframe IDs cycling through `1..5`
 - configurable Doppler, code phase, carrier phase, and amplitude
 - automatic amplitude estimation from the input IQ level using a target `C/N0`
-- detect-first planning for PRN, Doppler, code phase, amplitude, and compute settings
+- detect-first planning for PRN, Doppler, code phase, amplitude, TOW, and compute settings
 - JSON metadata describing the exact synthetic signature that was added
 
 The payload is synthetic and deterministic. It is useful for acquisition, tracking, bit sync, preamble detection, and parity checks, but it is not real broadcast ephemeris.
@@ -45,7 +45,9 @@ The GUI is the default entry point. It is built for large local recordings:
 
 Use `Detect` before `Start` when you want to see the exact plan first.
 
-The detect mode does not write an output file. It inspects the input recording, picks a deterministic synthetic PRN/code-phase/Doppler plan from the file fingerprint, estimates a realistic amplitude, resolves the compute backend, and writes the proposed values into the GUI fields.
+The detect mode does not write an output file. It inspects the input recording, picks a deterministic synthetic PRN/code-phase/Doppler plan from the file fingerprint, estimates a realistic amplitude, tries to determine the measurement TOW from LNAV HOW, resolves the compute backend, and writes the proposed values into the GUI fields.
+
+When a measurement TOW is found, `Start TOW count` and `Start subframe ID` are set so the synthetic LNAV HOW imitates the timing of the source recording. If TOW is not recoverable from the capture, Detect says so and keeps the deterministic default.
 
 Modes:
 
