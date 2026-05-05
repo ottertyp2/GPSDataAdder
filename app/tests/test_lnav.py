@@ -9,6 +9,8 @@ from app.dsp.lnav import (
     LNAV_WORD_BITS,
     PREAMBLE,
     build_lnav_bit_stream,
+    build_lnav_bit_stream_from_templates,
+    build_synthetic_subframe,
     check_lnav_word,
     extract_lnav_data_bits,
     find_lnav_tow,
@@ -59,6 +61,34 @@ def test_lnav_tow_can_be_found_from_hard_bits() -> None:
     assert estimate.tow_seconds == 7404
     assert estimate.subframe_id == 3
     assert estimate.polarity == "normal"
+
+
+def test_lnav_templates_rebuild_continuous_how_timing() -> None:
+    rng = np.random.default_rng(12)
+    previous = None
+    templates = []
+    for subframe_id in (1, 2, 3):
+        words = build_synthetic_subframe(subframe_id, 500 + subframe_id, rng, previous)
+        previous = words[-1]
+        templates.append(
+            {
+                "subframe_id": subframe_id,
+                "tow_count": 500 + subframe_id,
+                "words": ["".join(str(bit) for bit in word) for word in words],
+            }
+        )
+
+    bits = build_lnav_bit_stream_from_templates(
+        LNAV_SUBFRAME_BITS * 3,
+        templates,
+        start_tow_count=1234,
+        start_subframe_id=2,
+    )
+    estimate = find_lnav_tow(bits)
+
+    assert estimate is not None
+    assert estimate.tow_count == 1234
+    assert estimate.subframe_id == 2
 
 
 def test_lnav_generation_is_deterministic() -> None:

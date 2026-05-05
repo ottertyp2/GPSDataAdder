@@ -41,6 +41,7 @@ Agents working here should preserve the project's core priorities:
 - realistic auto-amplitude estimation from local IQ recordings
 - detect-first parameter planning before writing augmented files
 - measurement TOW detection and imitation for synthetic LNAV HOW fields
+- optional offline PVT relocation overlay by adding stronger received-PRN replicas without removing source samples
 - blockwise memmap processing with CPU parallelism and optional GPU fallback
 - deterministic synthetic PRN, navigation-bit, carrier, and metadata generation
 - windowed/chunked processing so large recordings do not need to fit into RAM
@@ -51,7 +52,7 @@ Agents working here should preserve the project's core priorities:
 
 - `app/main.py`: GUI entry point and optional command-line mode
 - `app/gui/`: main window and worker thread plumbing
-- `app/dsp/`: PRN generation, LNAV bit generation, fast Fraunhofer-assisted TOW detection, synthetic channel generation, and file mixing
+- `app/dsp/`: PRN generation, LNAV bit generation, fast Fraunhofer-assisted TOW detection, PVT relocation overlay generation, synthetic channel generation, and file mixing
 - `app/tests/`: unit and smoke tests
 - `tools/check_git_sync.ps1`: quick check for branch, status, and dual-push remote setup
 

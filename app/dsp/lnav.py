@@ -247,3 +247,76 @@ def build_lnav_bit_stream(
         previous_word = words[-1]
         subframe_index += 1
     return np.asarray(stream[:num_bits], dtype=np.int8)
+
+
+def _word_bits_from_string(bits: str) -> list[int]:
+    if len(bits) != LNAV_WORD_BITS or any(bit not in "01" for bit in bits):
+        raise ValueError("LNAV word templates must be 30-character bit strings.")
+    return [int(bit) for bit in bits]
+
+
+def _template_payload_words(words: Sequence[str]) -> list[list[int]]:
+    raw_words = [_word_bits_from_string(word) for word in words]
+    if len(raw_words) != LNAV_SUBFRAME_WORDS:
+        raise ValueError("Each LNAV subframe template must contain 10 words.")
+    data_words: list[list[int]] = []
+    data_words.append([int(bit) for bit in PREAMBLE] + int_to_bits(0x22C0, 16))
+    data_words.append([0] * LNAV_DATA_BITS)
+    previous = raw_words[1]
+    for raw_word in raw_words[2:]:
+        data_words.append(extract_lnav_data_bits(raw_word, previous))
+        previous = raw_word
+    return data_words
+
+
+def build_lnav_bit_stream_from_templates(
+    num_bits: int,
+    subframe_templates: Sequence[dict[str, object]],
+    start_tow_count: int,
+    start_subframe_id: int,
+) -> np.ndarray:
+    """Build a continuous LNAV stream from decoded raw subframe payloads.
+
+    The TLM and HOW words are regenerated so TOW/subframe timing remains
+    continuous, while payload words 3..10 reuse the decoded source data.
+    """
+
+    if num_bits < 0:
+        raise ValueError("Number of navigation bits must not be negative.")
+    if start_subframe_id < 1 or start_subframe_id > 5:
+        raise ValueError("Start subframe ID must be in the range 1..5.")
+    templates_by_id: dict[int, list[list[int]]] = {}
+    for template in subframe_templates:
+        subframe_id = int(template["subframe_id"])
+        if not 1 <= subframe_id <= 5:
+            continue
+        words = template.get("words")
+        if not isinstance(words, Sequence):
+            continue
+        templates_by_id[subframe_id] = _template_payload_words([str(word) for word in words])
+    missing = [subframe_id for subframe_id in (1, 2, 3) if subframe_id not in templates_by_id]
+    if missing:
+        raise ValueError(f"Missing ephemeris subframe template(s): {missing}.")
+
+    stream: list[int] = []
+    previous_word: list[int] | None = None
+    subframe_index = 0
+    while len(stream) < num_bits:
+        subframe_id = ((int(start_subframe_id) - 1 + subframe_index) % 5) + 1
+        payload_words = templates_by_id.get(subframe_id)
+        if payload_words is None:
+            payload_words = templates_by_id[((subframe_id - 1) % 3) + 1]
+        tow_count = (int(start_tow_count) + subframe_index) % MAX_TOW_COUNT
+        tlm_word = make_lnav_word(payload_words[0], previous_word)
+        how_data = int_to_bits(tow_count, 17) + [0, 0] + int_to_bits(subframe_id, 3) + [0, 0]
+        how_word = make_lnav_word(how_data, tlm_word)
+        words = [tlm_word, how_word]
+        previous = how_word
+        for data_bits in payload_words[2:]:
+            word = make_lnav_word(data_bits, previous)
+            words.append(word)
+            previous = word
+        stream.extend(bit for word in words for bit in word)
+        previous_word = words[-1]
+        subframe_index += 1
+    return np.asarray(stream[:num_bits], dtype=np.int8)

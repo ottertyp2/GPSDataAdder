@@ -69,6 +69,12 @@ The default target is `42 dB-Hz`. At the default `6.061 MSa/s` sample rate, that
 
 Use manual amplitude only when you want a deliberately strong or weak stress case.
 
+## Position Overlay
+
+The `Position Overlay` panel adds stronger synthetic replicas of already received satellites to a new local output file. It never removes or edits samples in the source recording. The planner uses `Fraunhofer_FHR` to decode a baseline PVT solution, the received PRNs, and their LNAV ephemeris words. It then computes code-phase shifts for a selected target coordinate or a small east/north/up offset, regenerates continuous TLM/HOW timing aligned to the measurement file time, reuses the decoded ephemeris payload words, and writes a multi-PRN overlay. When the backend resolves to GPU, the overlay writer mixes the synthetic PRN replicas on CUDA/CuPy block by block.
+
+Use `Use offset from detected PVT` for first tests. A few kilometres is the intended initial range because the overlay shifts pseudoranges by code phase while keeping the decoded source ephemerides. `Write Position Overlay` uses the visible output path and writes metadata to `<output>.relocation.json` when metadata is enabled.
+
 ## CLI Usage
 
 ```powershell
@@ -147,6 +153,7 @@ powershell -ExecutionPolicy Bypass -File tools/check_git_sync.ps1
 - `app/gui/`: PySide6 window and worker thread
 - `app/dsp/gps_ca.py`: GPS C/A PRN generation
 - `app/dsp/lnav.py`: synthetic LNAV-like bit stream and parity
+- `app/dsp/relocation_overlay.py`: multi-satellite position relocation overlay
 - `app/dsp/synthetic_satellite.py`: block signal generation and file augmentation
 - `app/tests/`: focused tests
 

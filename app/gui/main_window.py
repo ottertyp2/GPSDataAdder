@@ -37,7 +37,7 @@ from app.dsp.synthetic_satellite import (
     count_complex64_samples,
     default_output_path,
 )
-from app.gui.workers import AddSyntheticWorker, DetectPlanWorker
+from app.gui.workers import AddSyntheticWorker, DetectPlanWorker, RelocationAddWorker, RelocationPlanWorker
 
 
 class MainWindow(QMainWindow):
@@ -50,6 +50,9 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(960, 740)
         self.worker: AddSyntheticWorker | None = None
         self.detect_worker: DetectPlanWorker | None = None
+        self.relocation_plan_worker: RelocationPlanWorker | None = None
+        self.relocation_worker: RelocationAddWorker | None = None
+        self.relocation_plan: object | None = None
         self._output_auto = True
 
         root = QWidget()
@@ -62,6 +65,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._build_header())
         layout.addWidget(self._build_file_group())
         layout.addWidget(self._build_signal_group())
+        layout.addWidget(self._build_relocation_group())
         layout.addWidget(self._build_run_group())
         layout.addStretch(1)
         self._apply_style()
@@ -408,6 +412,94 @@ class MainWindow(QMainWindow):
         self._update_amplitude_controls()
         return group
 
+    def _build_relocation_group(self) -> QGroupBox:
+        group = QGroupBox("Position Overlay")
+        grid = QGridLayout(group)
+
+        self.overlay_offset_check = QCheckBox("Use offset from detected PVT")
+        self.overlay_offset_check.setChecked(True)
+
+        self.overlay_east_spin = QDoubleSpinBox()
+        self.overlay_east_spin.setRange(-20_000.0, 20_000.0)
+        self.overlay_east_spin.setDecimals(1)
+        self.overlay_east_spin.setSingleStep(100.0)
+        self.overlay_east_spin.setValue(1000.0)
+
+        self.overlay_north_spin = QDoubleSpinBox()
+        self.overlay_north_spin.setRange(-20_000.0, 20_000.0)
+        self.overlay_north_spin.setDecimals(1)
+        self.overlay_north_spin.setSingleStep(100.0)
+
+        self.overlay_up_spin = QDoubleSpinBox()
+        self.overlay_up_spin.setRange(-2000.0, 2000.0)
+        self.overlay_up_spin.setDecimals(1)
+        self.overlay_up_spin.setSingleStep(10.0)
+
+        self.overlay_lat_spin = QDoubleSpinBox()
+        self.overlay_lat_spin.setRange(-90.0, 90.0)
+        self.overlay_lat_spin.setDecimals(7)
+        self.overlay_lat_spin.setSingleStep(0.0001)
+        self.overlay_lat_spin.setValue(50.6163)
+
+        self.overlay_lon_spin = QDoubleSpinBox()
+        self.overlay_lon_spin.setRange(-180.0, 180.0)
+        self.overlay_lon_spin.setDecimals(7)
+        self.overlay_lon_spin.setSingleStep(0.0001)
+        self.overlay_lon_spin.setValue(7.1326)
+
+        self.overlay_alt_spin = QDoubleSpinBox()
+        self.overlay_alt_spin.setRange(-1000.0, 20_000.0)
+        self.overlay_alt_spin.setDecimals(1)
+        self.overlay_alt_spin.setSingleStep(10.0)
+        self.overlay_alt_spin.setValue(350.0)
+
+        self.overlay_cn0_spin = QDoubleSpinBox()
+        self.overlay_cn0_spin.setRange(35.0, 60.0)
+        self.overlay_cn0_spin.setDecimals(1)
+        self.overlay_cn0_spin.setSingleStep(1.0)
+        self.overlay_cn0_spin.setValue(50.0)
+
+        self.overlay_plan_button = QPushButton("Plan Position Overlay")
+        self.overlay_plan_button.setObjectName("detectButton")
+        self.overlay_plan_button.setIcon(self._standard_icon(QStyle.SP_FileDialogDetailedView))
+        self.overlay_plan_button.clicked.connect(self._plan_relocation)
+
+        self.overlay_write_button = QPushButton("Write Position Overlay")
+        self.overlay_write_button.setObjectName("startButton")
+        self.overlay_write_button.setIcon(self._standard_icon(QStyle.SP_MediaPlay))
+        self.overlay_write_button.setEnabled(False)
+        self.overlay_write_button.clicked.connect(self._start_relocation)
+
+        self.overlay_summary = QLabel("No position overlay plan yet.")
+        self.overlay_summary.setObjectName("planSummary")
+        self.overlay_summary.setWordWrap(True)
+        self.overlay_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        left = QFormLayout()
+        left.addRow("", self.overlay_offset_check)
+        left.addRow("East m", self.overlay_east_spin)
+        left.addRow("North m", self.overlay_north_spin)
+        left.addRow("Up m", self.overlay_up_spin)
+        left.addRow("Overlay C/N0", self.overlay_cn0_spin)
+
+        right = QFormLayout()
+        right.addRow("Target lat", self.overlay_lat_spin)
+        right.addRow("Target lon", self.overlay_lon_spin)
+        right.addRow("Target alt m", self.overlay_alt_spin)
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.overlay_plan_button)
+        buttons.addWidget(self.overlay_write_button)
+        buttons.addStretch(1)
+
+        grid.addLayout(left, 0, 0)
+        grid.addLayout(right, 0, 1)
+        grid.addLayout(buttons, 1, 0, 1, 2)
+        grid.addWidget(self.overlay_summary, 2, 0, 1, 2)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        return group
+
     def _build_run_group(self) -> QGroupBox:
         group = QGroupBox("Run")
         layout = QVBoxLayout(group)
@@ -568,6 +660,122 @@ class MainWindow(QMainWindow):
         self.plan_summary.setText("Detecting: analysing input level, signal plan, and Fraunhofer_FHR TOW.")
         self.detect_worker.start()
 
+    def _plan_relocation(self) -> None:
+        input_text = self.input_edit.text().strip()
+        if not input_text:
+            QMessageBox.warning(self, "Input", "Bitte eine Eingabedatei waehlen.")
+            return
+        input_path = Path(input_text)
+        if not input_path.exists():
+            QMessageBox.warning(self, "Input", "Die Eingabedatei existiert nicht.")
+            return
+        self.relocation_plan = None
+        self.overlay_write_button.setEnabled(False)
+        self.relocation_plan_worker = RelocationPlanWorker(
+            input_path=input_path,
+            sample_rate_hz=float(self.sample_rate_spin.value()),
+            target_latitude_deg=float(self.overlay_lat_spin.value()),
+            target_longitude_deg=float(self.overlay_lon_spin.value()),
+            target_altitude_m=float(self.overlay_alt_spin.value()),
+            offset_east_m=float(self.overlay_east_spin.value()),
+            offset_north_m=float(self.overlay_north_spin.value()),
+            offset_up_m=float(self.overlay_up_spin.value()),
+            use_offsets=self.overlay_offset_check.isChecked(),
+            target_cn0_dbhz=float(self.overlay_cn0_spin.value()),
+            requested_backend=self._requested_backend(),
+            worker_count=self._worker_count(),
+            in_flight_blocks=self._in_flight_blocks(),
+            chunk_samples=int(self.chunk_spin.value()),
+        )
+        self.relocation_plan_worker.message.connect(self._append_log)
+        self.relocation_plan_worker.succeeded.connect(self._relocation_plan_finished)
+        self.relocation_plan_worker.failed.connect(self._relocation_plan_failed)
+        self._set_overlay_busy(True, planning=True)
+        self.status_label.setText("Position overlay planning.")
+        self.header_state_label.setText("Planning overlay")
+        self.overlay_summary.setText("Planning: decoding PVT, source LNAV, and received satellite geometry.")
+        self.relocation_plan_worker.start()
+
+    def _relocation_plan_finished(self, result: object) -> None:
+        self._set_overlay_busy(False, planning=True)
+        self.relocation_plan = result
+        self.status_label.setText("Position overlay plan ready.")
+        self.header_state_label.setText("Overlay ready")
+        self.overlay_write_button.setEnabled(True)
+        self.overlay_lat_spin.setValue(float(getattr(result, "target_latitude_deg")))
+        self.overlay_lon_spin.setValue(float(getattr(result, "target_longitude_deg")))
+        self.overlay_alt_spin.setValue(float(getattr(result, "target_altitude_m")))
+        if self._output_auto:
+            input_path = Path(str(getattr(result, "input_path")))
+            suffix = input_path.suffix or ".bin"
+            self.output_edit.setText(str(input_path.with_name(f"{input_path.stem}.position_overlay{suffix}")))
+        summary_text = "\n".join(getattr(result, "summary_lines"))
+        self.overlay_summary.setText(summary_text)
+        self._append_log("Position overlay plan:")
+        for line in getattr(result, "summary_lines"):
+            self._append_log(f"  {line}")
+        for channel in getattr(result, "channels"):
+            self._append_log(
+                f"  PRN {channel.prn}: range delta {channel.range_delta_m:.1f} m, "
+                f"code phase {channel.original_code_phase_samples}->{channel.code_phase_samples}."
+            )
+        self.relocation_plan_worker = None
+
+    def _relocation_plan_failed(self, message: str) -> None:
+        self._set_overlay_busy(False, planning=True)
+        self.status_label.setText("Position overlay plan failed.")
+        self.header_state_label.setText("Overlay failed")
+        self.overlay_summary.setText("Position overlay planning failed. Details are in the log.")
+        self._append_log(message)
+        QMessageBox.critical(self, "Position Overlay", message)
+        self.relocation_plan_worker = None
+
+    def _start_relocation(self) -> None:
+        if self.relocation_plan is None:
+            QMessageBox.warning(self, "Position Overlay", "Bitte zuerst einen Position Overlay Plan erstellen.")
+            return
+        input_text = self.input_edit.text().strip()
+        output_text = self.output_edit.text().strip()
+        if not input_text:
+            QMessageBox.warning(self, "Input", "Bitte eine Eingabedatei waehlen.")
+            return
+        if not output_text:
+            QMessageBox.warning(self, "Output", "Bitte eine Ausgabedatei waehlen.")
+            return
+        input_path = Path(input_text)
+        output_path = Path(output_text)
+        if not input_path.exists():
+            QMessageBox.warning(self, "Input", "Die Eingabedatei existiert nicht.")
+            return
+        if input_path.resolve() == output_path.resolve():
+            QMessageBox.warning(self, "Output", "Input und Output muessen verschieden sein.")
+            return
+        if output_path.exists():
+            choice = QMessageBox.question(
+                self,
+                "Output ueberschreiben",
+                "Die Ausgabedatei existiert bereits. Ueberschreiben?",
+            )
+            if choice != QMessageBox.Yes:
+                return
+        metadata_path = output_path.with_suffix(output_path.suffix + ".relocation.json") if self.metadata_check.isChecked() else None
+        self.relocation_worker = RelocationAddWorker(
+            input_path=input_path,
+            output_path=output_path,
+            plan=self.relocation_plan,
+            metadata_path=metadata_path,
+        )
+        self.relocation_worker.progress_changed.connect(self._set_progress)
+        self.relocation_worker.message.connect(self._append_log)
+        self.relocation_worker.succeeded.connect(self._relocation_finished)
+        self.relocation_worker.canceled.connect(self._canceled)
+        self.relocation_worker.failed.connect(self._failed)
+        self.progress.setValue(0)
+        self.status_label.setText("Position overlay writing.")
+        self.header_state_label.setText("Processing overlay")
+        self._set_running(True)
+        self.relocation_worker.start()
+
     def _start(self) -> None:
         input_text = self.input_edit.text().strip()
         output_text = self.output_edit.text().strip()
@@ -624,6 +832,9 @@ class MainWindow(QMainWindow):
     def _cancel(self) -> None:
         if self.worker is not None:
             self.worker.cancel()
+            self.status_label.setText("Abbruch angefordert.")
+        if self.relocation_worker is not None:
+            self.relocation_worker.cancel()
             self.status_label.setText("Abbruch angefordert.")
 
     def _set_progress(self, value: float) -> None:
@@ -697,12 +908,30 @@ class MainWindow(QMainWindow):
             self._append_log(f"Metadata: {metadata_path}")
         self.worker = None
 
+    def _relocation_finished(self, result: object) -> None:
+        self._set_running(False)
+        self.status_label.setText("Position overlay fertig.")
+        self.header_state_label.setText("Done")
+        self._append_log(f"Fertig: {getattr(result, 'output_path', '')}")
+        self._append_log(f"Samples: {getattr(result, 'total_samples', '')}")
+        self._append_log(f"Overlay channels: {getattr(result, 'channel_count', '')}")
+        self._append_log(
+            f"Compute: {getattr(result, 'compute_backend', '')}, "
+            f"workers {getattr(result, 'worker_count', '')}, "
+            f"in-flight {getattr(result, 'in_flight_blocks', '')}"
+        )
+        metadata_path = getattr(result, "metadata_path", None)
+        if metadata_path:
+            self._append_log(f"Metadata: {metadata_path}")
+        self.relocation_worker = None
+
     def _canceled(self) -> None:
         self._set_running(False)
         self.progress.setValue(0)
         self.status_label.setText("Abgebrochen.")
         self.header_state_label.setText("Cancelled")
         self.worker = None
+        self.relocation_worker = None
 
     def _failed(self, message: str) -> None:
         self._set_running(False)
@@ -711,6 +940,7 @@ class MainWindow(QMainWindow):
         self._append_log(message)
         QMessageBox.critical(self, "Fehler", message)
         self.worker = None
+        self.relocation_worker = None
 
     def _set_running(self, running: bool) -> None:
         self.start_button.setEnabled(not running)
@@ -735,9 +965,21 @@ class MainWindow(QMainWindow):
             self.inflight_spin,
             self.detect_mode_combo,
             self.detect_button,
+            self.overlay_offset_check,
+            self.overlay_east_spin,
+            self.overlay_north_spin,
+            self.overlay_up_spin,
+            self.overlay_lat_spin,
+            self.overlay_lon_spin,
+            self.overlay_alt_spin,
+            self.overlay_cn0_spin,
+            self.overlay_plan_button,
+            self.overlay_write_button,
             self.metadata_check,
         ):
             widget.setEnabled(not running)
+        if not running:
+            self.overlay_write_button.setEnabled(self.relocation_plan is not None)
         if not running:
             self._update_amplitude_controls()
 
@@ -745,8 +987,37 @@ class MainWindow(QMainWindow):
         auto_enabled = self.auto_amplitude_check.isChecked()
         ui_enabled = not (self.worker is not None and self.worker.isRunning())
         ui_enabled = ui_enabled and not (self.detect_worker is not None and self.detect_worker.isRunning())
+        ui_enabled = ui_enabled and not (self.relocation_plan_worker is not None and self.relocation_plan_worker.isRunning())
+        ui_enabled = ui_enabled and not (self.relocation_worker is not None and self.relocation_worker.isRunning())
         self.amplitude_spin.setEnabled(ui_enabled and not auto_enabled)
         self.target_cn0_spin.setEnabled(ui_enabled and auto_enabled)
+
+    def _set_overlay_busy(self, busy: bool, planning: bool = False) -> None:
+        self.overlay_plan_button.setEnabled(not busy)
+        self.overlay_write_button.setEnabled((not busy) and self.relocation_plan is not None)
+        for widget in (
+            self.input_edit,
+            self.output_edit,
+            self.sample_rate_spin,
+            self.backend_combo,
+            self.workers_spin,
+            self.inflight_spin,
+            self.chunk_spin,
+            self.overlay_offset_check,
+            self.overlay_east_spin,
+            self.overlay_north_spin,
+            self.overlay_up_spin,
+            self.overlay_lat_spin,
+            self.overlay_lon_spin,
+            self.overlay_alt_spin,
+            self.overlay_cn0_spin,
+            self.detect_button,
+            self.start_button,
+            self.metadata_check,
+        ):
+            widget.setEnabled(not busy)
+        if not busy and planning:
+            self._update_amplitude_controls()
 
     def _set_detecting(self, detecting: bool) -> None:
         self.detect_button.setEnabled(not detecting)
@@ -771,15 +1042,29 @@ class MainWindow(QMainWindow):
             self.workers_spin,
             self.inflight_spin,
             self.detect_mode_combo,
+            self.overlay_offset_check,
+            self.overlay_east_spin,
+            self.overlay_north_spin,
+            self.overlay_up_spin,
+            self.overlay_lat_spin,
+            self.overlay_lon_spin,
+            self.overlay_alt_spin,
+            self.overlay_cn0_spin,
+            self.overlay_plan_button,
+            self.overlay_write_button,
             self.metadata_check,
         ):
             widget.setEnabled(not detecting)
+        if not detecting:
+            self.overlay_write_button.setEnabled(self.relocation_plan is not None)
         if not detecting:
             self._update_amplitude_controls()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self.detect_worker is not None and self.detect_worker.isRunning():
             self.detect_worker.wait(3000)
+        if self.relocation_plan_worker is not None and self.relocation_plan_worker.isRunning():
+            self.relocation_plan_worker.wait(3000)
         if self.worker is not None and self.worker.isRunning():
             choice = QMessageBox.question(
                 self,
@@ -791,4 +1076,15 @@ class MainWindow(QMainWindow):
                 return
             self.worker.cancel()
             self.worker.wait(3000)
+        if self.relocation_worker is not None and self.relocation_worker.isRunning():
+            choice = QMessageBox.question(
+                self,
+                "Verarbeitung laeuft",
+                "Die Position Overlay Verarbeitung laeuft noch. Abbrechen und schliessen?",
+            )
+            if choice != QMessageBox.Yes:
+                event.ignore()
+                return
+            self.relocation_worker.cancel()
+            self.relocation_worker.wait(3000)
         event.accept()
