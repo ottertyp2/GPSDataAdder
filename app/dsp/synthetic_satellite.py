@@ -539,17 +539,24 @@ def detect_synthetic_signal_plan(
     try:
         from app.dsp.tow_detect import detect_measurement_tow
 
-        tow = detect_measurement_tow(source, sample_rate_hz=sample_rate_hz)
+        tow = detect_measurement_tow(source, sample_rate_hz=sample_rate_hz, compute_backend=backend)
     except Exception:
         tow = None
     if tow is not None:
         measurement_tow_count = int(tow.tow_count)
         measurement_tow_seconds = int(tow.tow_seconds)
-        start_tow_count = int(tow.tow_count)
-        start_subframe_id = int(tow.subframe_id) if 1 <= int(tow.subframe_id) <= 5 else 1
+        start_tow_count = int(tow.synthetic_start_tow_count if tow.synthetic_start_tow_count is not None else tow.tow_count)
+        start_subframe_id = int(
+            tow.synthetic_start_subframe_id
+            if tow.synthetic_start_subframe_id is not None
+            else tow.subframe_id
+        )
+        if not (1 <= start_subframe_id <= 5):
+            start_subframe_id = 1
         tow_source = (
             f"{tow.source}: PRN {tow.prn}, TOW {tow.tow_seconds}s "
-            f"(count {tow.tow_count}), subframe {tow.subframe_id}"
+            f"(count {tow.tow_count}), subframe {tow.subframe_id}; "
+            f"synthetic start count {start_tow_count}, subframe {start_subframe_id}"
         )
     summary = (
         f"Detect mode: {mode.lower().strip()} ({target_cn0:.1f} dB-Hz target).",

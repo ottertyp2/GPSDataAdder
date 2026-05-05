@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 from typing import Sequence
 
 import numpy as np
@@ -19,6 +23,14 @@ DEFAULT_TOW_DOPPLER_MAX_HZ = 5_000
 DEFAULT_TOW_DOPPLER_STEP_HZ = 500
 DEFAULT_TOW_ACQUISITION_MS = 8
 DEFAULT_TOW_TRACK_SECONDS = 12.5
+FRAUNHOFER_PVT_START_TIME_S = 60.0
+FRAUNHOFER_PVT_ACQUISITION_WINDOW_S = 3.0
+FRAUNHOFER_PVT_TRACKING_S = 60.0
+FRAUNHOFER_PVT_MIN_DURATION_S = (
+    FRAUNHOFER_PVT_START_TIME_S
+    + FRAUNHOFER_PVT_ACQUISITION_WINDOW_S
+    + FRAUNHOFER_PVT_TRACKING_S
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +48,9 @@ class TowDetectionResult:
     polarity: str
     tracked_ms: int
     source: str
+    synthetic_start_tow_count: int | None = None
+    synthetic_start_subframe_id: int | None = None
+    file_time_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -227,12 +242,171 @@ def _load_sidecar_tow(path: Path) -> TowDetectionResult | None:
         polarity="metadata",
         tracked_ms=0,
         source="metadata sidecar",
+        synthetic_start_tow_count=tow_count,
+        synthetic_start_subframe_id=subframe_id if 1 <= subframe_id <= 5 else 1,
+        file_time_s=0.0,
+    )
+
+
+def _fraunhofer_project_path() -> Path | None:
+    configured = os.environ.get("FRAUNHOFER_FHR_PATH", "").strip()
+    candidates = []
+    if configured:
+        candidates.append(Path(configured))
+    candidates.append(Path(__file__).resolve().parents[3] / "Fraunhofer_FHR")
+    for candidate in candidates:
+        if (candidate / "app" / "dsp" / "pvt_pipeline.py").exists():
+            return candidate
+    return None
+
+
+def _detect_with_fraunhofer_pvt_pipeline(
+    path: Path,
+    sample_rate_hz: float,
+    compute_backend: str = "auto",
+) -> TowDetectionResult | None:
+    project = _fraunhofer_project_path()
+    if project is None:
+        return None
+
+    script = r"""
+import json
+import sys
+
+from app.dsp.pvt_pipeline import run_pvt_pipeline
+from app.models import SessionConfig
+
+file_path = sys.argv[1]
+sample_rate = float(sys.argv[2])
+backend = sys.argv[3]
+start_time_s = float(sys.argv[4])
+acquisition_window_s = float(sys.argv[5])
+tracking_s = float(sys.argv[6])
+session = SessionConfig(
+    file_path=file_path,
+    sample_rate=sample_rate,
+    compute_backend=backend,
+    max_workers=0,
+    gpu_enabled=(backend != "cpu"),
+)
+result = run_pvt_pipeline(
+    file_path,
+    session,
+    start_time_s=start_time_s,
+    acquisition_window_s=acquisition_window_s,
+    tracking_s=tracking_s,
+    max_satellites=8,
+    log_callback=lambda message: print(message, file=sys.stderr),
+)
+rows = []
+for prn, nav in result.nav_results_by_prn.items():
+    tracking = result.tracking_results_by_prn.get(prn)
+    bits = result.bit_results_by_prn.get(prn)
+    for subframe in nav.subframes:
+        if not subframe.valid or subframe.tow_seconds is None or subframe.subframe_id is None:
+            continue
+        bit_ms = 0
+        if bits is not None and 0 <= subframe.start_bit < bits.bit_start_ms.size:
+            bit_ms = int(bits.bit_start_ms[subframe.start_bit])
+        file_time_s = 0.0
+        if tracking is not None and tracking.sample_rate_hz > 0.0:
+            file_time_s = float(tracking.source_start_sample) / float(tracking.sample_rate_hz) + bit_ms * 1e-3
+        tow_count = int(subframe.tow_seconds) // 6
+        subframe_offset = int(round(file_time_s / 6.0))
+        rows.append(
+            {
+                "tow_count": tow_count,
+                "tow_seconds": int(subframe.tow_seconds),
+                "subframe_id": int(subframe.subframe_id),
+                "prn": int(prn),
+                "file_time_s": file_time_s,
+                "bit_index": int(subframe.start_bit),
+                "tracked_ms": int(tracking.times_s.size) if tracking is not None else 0,
+                "synthetic_start_tow_count": int((tow_count - subframe_offset) % (604800 // 6)),
+                "synthetic_start_subframe_id": int(((int(subframe.subframe_id) - 1 - subframe_offset) % 5) + 1),
+                "source": "Fraunhofer_FHR PVT pipeline",
+            }
+        )
+if rows:
+    rows.sort(key=lambda item: item["file_time_s"])
+    print(json.dumps(rows[0], sort_keys=True))
+elif result.pvt_result.gps_time_of_week_s is not None:
+    gps_tow = float(result.pvt_result.gps_time_of_week_s)
+    tow_count = int(round(gps_tow / 6.0)) % (604800 // 6)
+    print(
+        json.dumps(
+            {
+                "tow_count": tow_count,
+                "tow_seconds": tow_count * 6,
+                "subframe_id": 1,
+                "prn": 0,
+                "file_time_s": 0.0,
+                "bit_index": 0,
+                "tracked_ms": 0,
+                "synthetic_start_tow_count": tow_count,
+                "synthetic_start_subframe_id": 1,
+                "source": "Fraunhofer_FHR PVT solution time",
+            },
+            sort_keys=True,
+        )
+    )
+else:
+    print("{}")
+"""
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                script,
+                str(path),
+                str(float(sample_rate_hz)),
+                compute_backend,
+                str(FRAUNHOFER_PVT_START_TIME_S),
+                str(FRAUNHOFER_PVT_ACQUISITION_WINDOW_S),
+                str(FRAUNHOFER_PVT_TRACKING_S),
+            ],
+            cwd=str(project),
+            text=True,
+            capture_output=True,
+            timeout=1800,
+            check=False,
+        )
+    except Exception:
+        return None
+    if completed.returncode != 0:
+        return None
+    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    if not lines:
+        return None
+    try:
+        payload = json.loads(lines[-1])
+    except json.JSONDecodeError:
+        return None
+    if not payload:
+        return None
+    return TowDetectionResult(
+        tow_count=int(payload["tow_count"]),
+        tow_seconds=int(payload["tow_seconds"]),
+        subframe_id=int(payload["subframe_id"]),
+        prn=int(payload.get("prn", 0)),
+        doppler_hz=0.0,
+        code_phase_samples=0,
+        acquisition_metric=0.0,
+        bit_index=int(payload.get("bit_index", 0)),
+        polarity="pvt",
+        tracked_ms=int(payload.get("tracked_ms", 0)),
+        source=str(payload.get("source", "Fraunhofer_FHR PVT pipeline")),
+        synthetic_start_tow_count=int(payload.get("synthetic_start_tow_count", payload["tow_count"])),
+        synthetic_start_subframe_id=int(payload.get("synthetic_start_subframe_id", payload["subframe_id"])),
+        file_time_s=float(payload.get("file_time_s", 0.0)),
     )
 
 
 def detect_measurement_tow(
     input_path: str | Path,
     sample_rate_hz: float,
+    compute_backend: str = "auto",
     prns: Sequence[int] = DEFAULT_TOW_PRNS,
     acquisition_ms: int = DEFAULT_TOW_ACQUISITION_MS,
     track_seconds: float = DEFAULT_TOW_TRACK_SECONDS,
@@ -250,6 +424,17 @@ def detect_measurement_tow(
 
     if not np.isfinite(sample_rate_hz) or sample_rate_hz <= 0:
         raise ValueError("Sample rate must be positive for TOW detection.")
+    total_samples = count_complex64_samples(path)
+    duration_s = float(total_samples) / float(sample_rate_hz)
+    if duration_s >= FRAUNHOFER_PVT_MIN_DURATION_S:
+        pvt_result = _detect_with_fraunhofer_pvt_pipeline(
+            path,
+            sample_rate_hz=sample_rate_hz,
+            compute_backend=compute_backend,
+        )
+        if pvt_result is not None:
+            return pvt_result
+
     candidate = _acquire_tow_candidate(
         path,
         sample_rate_hz=sample_rate_hz,

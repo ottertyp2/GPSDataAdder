@@ -46,24 +46,222 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("GPSDataAdder")
-        self.resize(920, 680)
+        self.resize(1000, 780)
+        self.setMinimumSize(960, 740)
         self.worker: AddSyntheticWorker | None = None
         self.detect_worker: DetectPlanWorker | None = None
         self._output_auto = True
 
         root = QWidget()
+        root.setObjectName("root")
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
 
+        layout.addWidget(self._build_header())
         layout.addWidget(self._build_file_group())
         layout.addWidget(self._build_signal_group())
         layout.addWidget(self._build_run_group())
         layout.addStretch(1)
+        self._apply_style()
 
     def _standard_icon(self, standard_icon: QStyle.StandardPixmap):
         return QApplication.style().standardIcon(standard_icon)
+
+    def _build_header(self) -> QWidget:
+        header = QWidget()
+        header.setObjectName("headerPanel")
+        layout = QHBoxLayout(header)
+        layout.setContentsMargins(16, 12, 16, 12)
+        title = QLabel("GPSDataAdder")
+        title.setObjectName("appTitle")
+        self.header_state_label = QLabel("Ready")
+        self.header_state_label.setObjectName("headerState")
+        layout.addWidget(title)
+        layout.addStretch(1)
+        layout.addWidget(self.header_state_label)
+        return header
+
+    def _apply_style(self) -> None:
+        self.setStyleSheet(
+            """
+            QMainWindow, QWidget#root {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #eef1f5, stop:1 #dde3ec);
+                color: #172033;
+                font-family: "Segoe UI", "Inter", "Roboto", sans-serif;
+            }
+            QWidget {
+                font-size: 10pt;
+            }
+            QWidget#headerPanel {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #0f172a, stop:1 #1e293b);
+                border-radius: 8px;
+            }
+            QLabel#appTitle {
+                color: #f8fafc;
+                font-size: 20pt;
+                font-weight: 800;
+                letter-spacing: 1px;
+            }
+            QLabel#headerState {
+                color: #94a3b8;
+                background: rgba(255,255,255,0.07);
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 6px;
+                padding: 6px 14px;
+                font-weight: 600;
+            }
+            QGroupBox {
+                background: #ffffff;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+                margin-top: 22px;
+                padding: 14px;
+                font-weight: 700;
+                font-size: 10pt;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 6px;
+                color: #0f172a;
+            }
+            QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+                background: #f8fafc;
+                border: 1px solid #cbd5e1;
+                border-radius: 5px;
+                padding: 6px 8px;
+                min-height: 24px;
+                selection-background-color: #3b82f6;
+            }
+            QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
+                border: 2px solid #3b82f6;
+                background: #ffffff;
+            }
+            QPushButton {
+                background: #f1f5f9;
+                border: 1px solid #cbd5e1;
+                border-radius: 6px;
+                color: #1e293b;
+                padding: 8px 14px;
+                font-weight: 600;
+            }
+            QPushButton:hover:enabled {
+                background: #e2e8f0;
+                border-color: #94a3b8;
+            }
+            QPushButton:pressed:enabled {
+                background: #cbd5e1;
+            }
+            QPushButton:disabled {
+                color: #94a3b8;
+                background: #f1f5f9;
+                border-color: #e2e8f0;
+            }
+            QPushButton#detectButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #3b82f6, stop:1 #2563eb);
+                border: 1px solid #1d4ed8;
+                color: #ffffff;
+                font-weight: 800;
+                font-size: 11pt;
+                padding: 10px 22px;
+                border-radius: 7px;
+            }
+            QPushButton#detectButton:hover:enabled {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #60a5fa, stop:1 #3b82f6);
+            }
+            QPushButton#detectButton:pressed:enabled {
+                background: #1d4ed8;
+            }
+            QPushButton#startButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #10b981, stop:1 #059669);
+                border: 1px solid #047857;
+                color: #ffffff;
+                font-weight: 800;
+                font-size: 11pt;
+                padding: 10px 22px;
+                border-radius: 7px;
+            }
+            QPushButton#startButton:hover:enabled {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #34d399, stop:1 #10b981);
+            }
+            QPushButton#startButton:pressed:enabled {
+                background: #047857;
+            }
+            QPushButton#cancelButton {
+                background: #fef2f2;
+                border: 1px solid #fca5a5;
+                color: #991b1b;
+                font-weight: 600;
+            }
+            QPushButton#cancelButton:hover:enabled {
+                background: #fee2e2;
+                border-color: #f87171;
+            }
+            QLabel#subtleLabel {
+                color: #64748b;
+                font-size: 9pt;
+            }
+            QLabel#planSummary {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #eff6ff, stop:1 #f0f9ff);
+                border: 1px solid #bfdbfe;
+                border-left: 5px solid #3b82f6;
+                border-radius: 6px;
+                color: #1e3a5f;
+                padding: 12px 14px;
+                font-family: Consolas, "Cascadia Code", "Courier New", monospace;
+                font-size: 9pt;
+                line-height: 1.5;
+            }
+            QProgressBar {
+                border: 1px solid #e2e8f0;
+                border-radius: 6px;
+                background: #f8fafc;
+                height: 18px;
+                text-align: center;
+                font-weight: 600;
+                font-size: 9pt;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #10b981, stop:1 #059669);
+                border-radius: 5px;
+            }
+            QPlainTextEdit {
+                background: #0f172a;
+                border: 1px solid #1e293b;
+                border-radius: 6px;
+                color: #e2e8f0;
+                font-family: Consolas, "Cascadia Code", "Courier New", monospace;
+                font-size: 9pt;
+                padding: 10px;
+                selection-background-color: #3b82f6;
+            }
+            QCheckBox {
+                spacing: 6px;
+                font-weight: 600;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border-radius: 3px;
+                border: 1px solid #94a3b8;
+                background: #f8fafc;
+            }
+            QCheckBox::indicator:checked {
+                background: #3b82f6;
+                border-color: #2563eb;
+            }
+            """
+        )
 
     def _build_file_group(self) -> QGroupBox:
         group = QGroupBox("Dateien")
@@ -73,6 +271,7 @@ class MainWindow(QMainWindow):
         self.input_edit.setPlaceholderText("Eingabe: complex64 .bin/.dat/.iq")
         self.input_edit.textChanged.connect(self._input_changed)
         input_button = QPushButton()
+        input_button.setObjectName("iconButton")
         input_button.setIcon(self._standard_icon(QStyle.SP_DialogOpenButton))
         input_button.setToolTip("Eingabedatei auswählen")
         input_button.clicked.connect(self._choose_input)
@@ -81,11 +280,13 @@ class MainWindow(QMainWindow):
         self.output_edit.setPlaceholderText("Ausgabe: neue augmented Datei")
         self.output_edit.textEdited.connect(self._output_edited)
         output_button = QPushButton()
+        output_button.setObjectName("iconButton")
         output_button.setIcon(self._standard_icon(QStyle.SP_DialogSaveButton))
         output_button.setToolTip("Ausgabedatei auswählen")
         output_button.clicked.connect(self._choose_output)
 
         self.file_info_label = QLabel("Keine Datei geladen.")
+        self.file_info_label.setObjectName("subtleLabel")
         self.file_info_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
         grid.addWidget(QLabel("Input"), 0, 0)
@@ -220,13 +421,16 @@ class MainWindow(QMainWindow):
         self.detect_mode_combo.addItem("Weak", "weak")
         self.detect_mode_combo.addItem("Strong", "strong")
         self.detect_mode_combo.setToolTip("Detect mode sets the target C/N0 before generating the plan.")
-        self.detect_button = QPushButton("Detect")
+        self.detect_button = QPushButton("  Detect  ")
+        self.detect_button.setObjectName("detectButton")
         self.detect_button.setIcon(self._standard_icon(QStyle.SP_FileDialogContentsView))
         self.detect_button.clicked.connect(self._detect)
-        self.start_button = QPushButton("Start")
+        self.start_button = QPushButton("  Start  ")
+        self.start_button.setObjectName("startButton")
         self.start_button.setIcon(self._standard_icon(QStyle.SP_MediaPlay))
         self.start_button.clicked.connect(self._start)
         self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setObjectName("cancelButton")
         self.cancel_button.setIcon(self._standard_icon(QStyle.SP_BrowserStop))
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self._cancel)
@@ -238,6 +442,11 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.start_button)
         controls.addWidget(self.cancel_button)
 
+        self.plan_summary = QLabel("Run Detect to analyse the input file and generate a signal plan.")
+        self.plan_summary.setObjectName("planSummary")
+        self.plan_summary.setWordWrap(True)
+        self.plan_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
         self.progress = QProgressBar()
         self.progress.setRange(0, 1000)
         self.progress.setValue(0)
@@ -246,9 +455,10 @@ class MainWindow(QMainWindow):
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(500)
-        self.log.setMinimumHeight(170)
+        self.log.setMinimumHeight(140)
 
         layout.addLayout(controls)
+        layout.addWidget(self.plan_summary)
         layout.addWidget(self.progress)
         layout.addWidget(self.status_label)
         layout.addWidget(self.log)
@@ -355,6 +565,7 @@ class MainWindow(QMainWindow):
         self.detect_worker.failed.connect(self._detect_failed)
         self._set_detecting(True)
         self.status_label.setText("Detect laeuft.")
+        self.header_state_label.setText("⏳ Detecting…")
         self.detect_worker.start()
 
     def _start(self) -> None:
@@ -404,6 +615,7 @@ class MainWindow(QMainWindow):
 
         self.progress.setValue(0)
         self.status_label.setText("Läuft.")
+        self.header_state_label.setText("⏳ Processing…")
         self._append_log(f"Input: {input_path}")
         self._append_log(f"Output: {output_path}")
         self._set_running(True)
@@ -424,6 +636,7 @@ class MainWindow(QMainWindow):
     def _detect_finished(self, result: object) -> None:
         self._set_detecting(False)
         self.status_label.setText("Detect fertig.")
+        self.header_state_label.setText("✅ Plan ready")
         plan = result
         self.prn_spin.setValue(int(getattr(plan, "prn")))
         self.doppler_spin.setValue(float(getattr(plan, "doppler_hz")))
@@ -442,6 +655,8 @@ class MainWindow(QMainWindow):
             if self.backend_combo.itemData(index) == backend:
                 self.backend_combo.setCurrentIndex(index)
                 break
+        summary_text = "\n".join(getattr(plan, "summary_lines"))
+        self.plan_summary.setText(summary_text)
         self._append_log("Detect plan:")
         for line in getattr(plan, "summary_lines"):
             self._append_log(f"  {line}")
@@ -451,6 +666,7 @@ class MainWindow(QMainWindow):
     def _detect_failed(self, message: str) -> None:
         self._set_detecting(False)
         self.status_label.setText("Detect Fehler.")
+        self.header_state_label.setText("❌ Detect failed")
         self._append_log(message)
         QMessageBox.critical(self, "Detect Fehler", message)
         self.detect_worker = None
@@ -458,6 +674,7 @@ class MainWindow(QMainWindow):
     def _finished(self, result: object) -> None:
         self._set_running(False)
         self.status_label.setText("Fertig.")
+        self.header_state_label.setText("✅ Done")
         self._append_log(f"Fertig: {getattr(result, 'output_path', '')}")
         self._append_log(f"Samples: {getattr(result, 'total_samples', '')}")
         self._append_log(f"Signature: {getattr(result, 'synthetic_signature_id', '')}")
@@ -482,11 +699,13 @@ class MainWindow(QMainWindow):
         self._set_running(False)
         self.progress.setValue(0)
         self.status_label.setText("Abgebrochen.")
+        self.header_state_label.setText("⚠ Cancelled")
         self.worker = None
 
     def _failed(self, message: str) -> None:
         self._set_running(False)
         self.status_label.setText("Fehler.")
+        self.header_state_label.setText("❌ Error")
         self._append_log(message)
         QMessageBox.critical(self, "Fehler", message)
         self.worker = None
