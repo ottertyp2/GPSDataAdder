@@ -126,6 +126,18 @@ class MainWindow(QMainWindow):
         self.amplitude_spin.setSingleStep(0.01)
         self.amplitude_spin.setValue(0.05)
 
+        self.auto_amplitude_check = QCheckBox("Auto amplitude")
+        self.auto_amplitude_check.setChecked(True)
+        self.auto_amplitude_check.setToolTip("Estimate input RMS and place the synthetic GPS channel at the target C/N0.")
+        self.auto_amplitude_check.toggled.connect(self._update_amplitude_controls)
+
+        self.target_cn0_spin = QDoubleSpinBox()
+        self.target_cn0_spin.setRange(25.0, 55.0)
+        self.target_cn0_spin.setDecimals(1)
+        self.target_cn0_spin.setSingleStep(1.0)
+        self.target_cn0_spin.setValue(42.0)
+        self.target_cn0_spin.setToolTip("Target carrier-to-noise density for automatic amplitude.")
+
         self.carrier_phase_spin = QDoubleSpinBox()
         self.carrier_phase_spin.setRange(-360.0, 360.0)
         self.carrier_phase_spin.setDecimals(2)
@@ -152,6 +164,8 @@ class MainWindow(QMainWindow):
 
         form_right = QFormLayout()
         form_right.addRow("Amplitude", self.amplitude_spin)
+        form_right.addRow("", self.auto_amplitude_check)
+        form_right.addRow("Target C/N0 dB-Hz", self.target_cn0_spin)
         form_right.addRow("Carrier phase deg", self.carrier_phase_spin)
         form_right.addRow("Start TOW count", self.tow_spin)
         form_right.addRow("Chunk samples", self.chunk_spin)
@@ -161,6 +175,7 @@ class MainWindow(QMainWindow):
         grid.addLayout(form_right, 0, 1)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
+        self._update_amplitude_controls()
         return group
 
     def _build_run_group(self) -> QGroupBox:
@@ -297,6 +312,8 @@ class MainWindow(QMainWindow):
             self._config(),
             self.chunk_spin.value(),
             metadata_path,
+            self.auto_amplitude_check.isChecked(),
+            self.target_cn0_spin.value(),
         )
         self.worker.progress_changed.connect(self._set_progress)
         self.worker.message.connect(self._append_log)
@@ -329,6 +346,13 @@ class MainWindow(QMainWindow):
         self._append_log(f"Fertig: {getattr(result, 'output_path', '')}")
         self._append_log(f"Samples: {getattr(result, 'total_samples', '')}")
         self._append_log(f"Signature: {getattr(result, 'synthetic_signature_id', '')}")
+        self._append_log(f"Amplitude: {getattr(result, 'effective_amplitude', '')}")
+        amplitude_estimate = getattr(result, "amplitude_estimate", None)
+        if amplitude_estimate is not None:
+            self._append_log(
+                f"Auto level: input RMS {amplitude_estimate.input_rms:.6g}, "
+                f"relative {amplitude_estimate.relative_db:.2f} dB"
+            )
         metadata_path = getattr(result, "metadata_path", None)
         if metadata_path:
             self._append_log(f"Metadata: {metadata_path}")
@@ -358,6 +382,8 @@ class MainWindow(QMainWindow):
             self.doppler_spin,
             self.code_phase_spin,
             self.amplitude_spin,
+            self.auto_amplitude_check,
+            self.target_cn0_spin,
             self.carrier_phase_spin,
             self.tow_spin,
             self.seed_spin,
@@ -365,6 +391,14 @@ class MainWindow(QMainWindow):
             self.metadata_check,
         ):
             widget.setEnabled(not running)
+        if not running:
+            self._update_amplitude_controls()
+
+    def _update_amplitude_controls(self) -> None:
+        auto_enabled = self.auto_amplitude_check.isChecked()
+        ui_enabled = not (self.worker is not None and self.worker.isRunning())
+        self.amplitude_spin.setEnabled(ui_enabled and not auto_enabled)
+        self.target_cn0_spin.setEnabled(ui_enabled and auto_enabled)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self.worker is not None and self.worker.isRunning():

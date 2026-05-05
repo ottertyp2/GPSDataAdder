@@ -11,6 +11,7 @@ The tool is meant for testing the `Fraunhofer_FHR` GPS decoder against controlle
 - valid LNAV word parity for TLM/HOW and payload words
 - plausible TLM preamble and HOW subframe IDs cycling through `1..5`
 - configurable Doppler, code phase, carrier phase, and amplitude
+- automatic amplitude estimation from the input IQ level using a target `C/N0`
 - JSON metadata describing the exact synthetic signature that was added
 
 The payload is synthetic and deterministic. It is useful for acquisition, tracking, bit sync, preamble detection, and parity checks, but it is not real broadcast ephemeris.
@@ -35,11 +36,20 @@ The GUI is the default entry point. It is built for large local recordings:
 - samples are streamed in chunks instead of loading the full file into RAM
 - progress and cancel are available during long 10-minute recordings
 - output is written to a temporary `.partial` file and moved into place only after success
+- `Auto amplitude` estimates the input RMS from several windows and chooses a GPS-like level
+
+## Automatic Amplitude
+
+The GUI enables `Auto amplitude` by default. It probes a few windows across the input file, computes a clipped RMS so isolated spikes do not dominate, and sets the synthetic satellite level from the target `C/N0`.
+
+The default target is `42 dB-Hz`. At the default `6.061 MSa/s` sample rate, that places the synthetic signal roughly `25.8 dB` below the measured IQ RMS in power terms, which keeps it GPS-like instead of visually obvious in raw samples.
+
+Use manual amplitude only when you want a deliberately strong or weak stress case.
 
 ## CLI Usage
 
 ```powershell
-python -m app.main --cli input.bin output_with_synthetic_prn.bin --sample-rate 6060606.0606 --prn 22 --doppler-hz 1800 --code-phase-samples 350 --amplitude 0.05
+python -m app.main --cli input.bin output_with_synthetic_prn.bin --sample-rate 6060606.0606 --prn 22 --doppler-hz 1800 --code-phase-samples 350 --auto-amplitude
 ```
 
 Useful defaults match the local decoder workflow:
@@ -49,7 +59,8 @@ Useful defaults match the local decoder workflow:
 - default PRN: `22`
 - default Doppler: `1500 Hz`
 - default code phase: `350 samples`
-- default amplitude: `0.05`
+- default auto amplitude target: `42 dB-Hz`
+- default manual amplitude: `0.05`
 - default chunk size: `1,000,000 samples`
 
 If no output path is supplied, the tool writes next to the input file using a name like:

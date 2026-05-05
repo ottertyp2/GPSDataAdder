@@ -8,6 +8,7 @@ import sys
 
 from app.dsp.synthetic_satellite import (
     DEFAULT_SAMPLE_RATE_HZ,
+    DEFAULT_TARGET_CN0_DBHZ,
     SyntheticSatelliteConfig,
     add_synthetic_satellite_to_file,
     default_output_path,
@@ -62,7 +63,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--amplitude",
         type=float,
         default=0.05,
-        help="Synthetic channel amplitude in complex sample units.",
+        help="Manual synthetic channel amplitude in complex sample units.",
+    )
+    parser.add_argument(
+        "--auto-amplitude",
+        action="store_true",
+        help="Estimate input RMS and choose amplitude from target C/N0.",
+    )
+    parser.add_argument(
+        "--target-cn0-dbhz",
+        type=float,
+        default=DEFAULT_TARGET_CN0_DBHZ,
+        help="Target C/N0 for --auto-amplitude. Default: 42.0 dB-Hz.",
     )
     parser.add_argument(
         "--carrier-phase-deg",
@@ -131,11 +143,18 @@ def run_cli(argv: list[str] | None = None) -> int:
         chunk_samples=int(args.chunk_samples),
         metadata_path=metadata_path,
         progress_callback=report,
+        auto_amplitude=bool(args.auto_amplitude),
+        target_cn0_dbhz=float(args.target_cn0_dbhz),
     )
 
     print(f"Wrote {result.output_path}")
     print(f"Samples: {result.total_samples}")
     print(f"Duration: {result.duration_s:.3f} s")
+    print(f"Amplitude: {result.effective_amplitude:.9g} ({result.amplitude_mode})")
+    if result.amplitude_estimate is not None:
+        estimate = result.amplitude_estimate
+        print(f"Input RMS: {estimate.input_rms:.9g}")
+        print(f"Relative level: {estimate.relative_db:.2f} dB")
     print(f"Synthetic signature: {result.synthetic_signature_id}")
     if result.metadata_path:
         print(f"Metadata: {result.metadata_path}")

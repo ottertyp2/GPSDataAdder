@@ -19,5 +19,8 @@ def test_main_window_constructs() -> None:
 
     assert window.windowTitle() == "GPSDataAdder"
     assert window.prn_spin.value() == 22
+    assert window.auto_amplitude_check.isChecked()
+    assert not window.amplitude_spin.isEnabled()
+    assert window.target_cn0_spin.value() == 42.0
     window.close()
     assert app is not None

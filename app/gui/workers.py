@@ -31,6 +31,8 @@ class AddSyntheticWorker(QThread):
         config: SyntheticSatelliteConfig,
         chunk_samples: int,
         metadata_path: Path | None,
+        auto_amplitude: bool = False,
+        target_cn0_dbhz: float = 42.0,
     ) -> None:
         super().__init__()
         self.input_path = input_path
@@ -38,6 +40,8 @@ class AddSyntheticWorker(QThread):
         self.config = config
         self.chunk_samples = chunk_samples
         self.metadata_path = metadata_path
+        self.auto_amplitude = auto_amplitude
+        self.target_cn0_dbhz = target_cn0_dbhz
         self._cancel_requested = False
 
     def cancel(self) -> None:
@@ -48,6 +52,8 @@ class AddSyntheticWorker(QThread):
 
     def run(self) -> None:
         try:
+            if self.auto_amplitude:
+                self.message.emit(f"Auto-Amplitude: schaetze Eingabepegel fuer {self.target_cn0_dbhz:.1f} dB-Hz.")
             self.message.emit("Starte blockweise Verarbeitung.")
             result: AddResult = add_synthetic_satellite_to_file(
                 self.input_path,
@@ -57,7 +63,10 @@ class AddSyntheticWorker(QThread):
                 metadata_path=self.metadata_path,
                 progress_callback=self.progress_changed.emit,
                 cancel_callback=self._is_canceled,
+                auto_amplitude=self.auto_amplitude,
+                target_cn0_dbhz=self.target_cn0_dbhz,
             )
+            self.message.emit(f"Verwendete Amplitude: {result.effective_amplitude:.6g} ({result.amplitude_mode}).")
             self.progress_changed.emit(100.0)
             self.succeeded.emit(result)
         except ProcessingCancelled:
