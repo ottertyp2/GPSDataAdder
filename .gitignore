@@ -1,0 +1,14 @@
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+*.pyc
+*.pyo
+*.bin
+*.dat
+*.iq
+*.tmp
+*.log
+*.json
+!.agents/**/*.json
+!tools/**/*.json

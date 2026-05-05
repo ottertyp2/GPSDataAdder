@@ -1,0 +1,64 @@
+"""Tests for synthetic satellite generation and file augmentation."""
+
+from __future__ import annotations
+
+import json
+
+import numpy as np
+import pytest
+
+from app.dsp.lnav import build_lnav_bit_stream
+from app.dsp.synthetic_satellite import (
+    SyntheticSatelliteConfig,
+    add_synthetic_satellite_to_file,
+    generate_synthetic_satellite_block,
+)
+
+
+def test_block_generation_is_continuous_across_chunks() -> None:
+    config = SyntheticSatelliteConfig(sample_rate_hz=4_092_000.0, prn=3, doppler_hz=750.0, amplitude=0.2)
+    nav_bits = build_lnav_bit_stream(1000, seed=config.nav_seed)
+
+    full = generate_synthetic_satellite_block(config, 0, 12_000, nav_bits)
+    split = np.concatenate(
+        [
+            generate_synthetic_satellite_block(config, 0, 5000, nav_bits),
+            generate_synthetic_satellite_block(config, 5000, 7000, nav_bits),
+        ]
+    )
+
+    np.testing.assert_allclose(full, split, rtol=1e-6, atol=1e-6)
+
+
+def test_file_augmentation_writes_complex64_output_and_metadata(tmp_path) -> None:
+    input_path = tmp_path / "input.bin"
+    output_path = tmp_path / "output.bin"
+    metadata_path = tmp_path / "output.json"
+    original = np.zeros(20_000, dtype=np.complex64)
+    original.tofile(input_path)
+    config = SyntheticSatelliteConfig(sample_rate_hz=1_023_000.0, prn=5, doppler_hz=250.0, amplitude=0.1)
+
+    result = add_synthetic_satellite_to_file(
+        input_path,
+        output_path,
+        config,
+        chunk_samples=4096,
+        metadata_path=metadata_path,
+    )
+    augmented = np.fromfile(output_path, dtype=np.complex64)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    assert result.total_samples == original.size
+    assert augmented.dtype == np.complex64
+    assert augmented.shape == original.shape
+    assert np.max(np.abs(augmented)) == pytest.approx(config.amplitude)
+    assert metadata["config"]["prn"] == 5
+    assert metadata["synthetic_signature_id"] == result.synthetic_signature_id
+
+
+def test_input_and_output_must_differ(tmp_path) -> None:
+    path = tmp_path / "same.bin"
+    np.zeros(8, dtype=np.complex64).tofile(path)
+
+    with pytest.raises(ValueError, match="different"):
+        add_synthetic_satellite_to_file(path, path, SyntheticSatelliteConfig())
