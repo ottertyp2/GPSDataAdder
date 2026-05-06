@@ -274,17 +274,22 @@ def build_lnav_bit_stream_from_templates(
     subframe_templates: Sequence[dict[str, object]],
     start_tow_count: int,
     start_subframe_id: int,
+    reference_bit_index: int = 0,
 ) -> np.ndarray:
     """Build a continuous LNAV stream from decoded raw subframe payloads.
 
     The TLM and HOW words are regenerated so TOW/subframe timing remains
-    continuous, while payload words 3..10 reuse the decoded source data.
+    continuous, while payload words 3..10 reuse the decoded source data. The
+    reference subframe starts at ``reference_bit_index`` in the returned stream.
     """
 
     if num_bits < 0:
         raise ValueError("Number of navigation bits must not be negative.")
     if start_subframe_id < 1 or start_subframe_id > 5:
         raise ValueError("Start subframe ID must be in the range 1..5.")
+    reference_bit_index = int(reference_bit_index)
+    if reference_bit_index < 0:
+        raise ValueError("Reference bit index must not be negative.")
     templates_by_id: dict[int, list[list[int]]] = {}
     for template in subframe_templates:
         subframe_id = int(template["subframe_id"])
@@ -298,10 +303,7 @@ def build_lnav_bit_stream_from_templates(
     if missing:
         raise ValueError(f"Missing ephemeris subframe template(s): {missing}.")
 
-    stream: list[int] = []
-    previous_word: list[int] | None = None
-    subframe_index = 0
-    while len(stream) < num_bits:
+    def append_subframe(stream: list[int], subframe_index: int, previous_word: list[int] | None) -> list[int]:
         subframe_id = ((int(start_subframe_id) - 1 + subframe_index) % 5) + 1
         payload_words = templates_by_id.get(subframe_id)
         if payload_words is None:
@@ -317,6 +319,20 @@ def build_lnav_bit_stream_from_templates(
             words.append(word)
             previous = word
         stream.extend(bit for word in words for bit in word)
-        previous_word = words[-1]
+        return words[-1]
+
+    prefix: list[int] = []
+    if reference_bit_index:
+        previous_word = None
+        prefix_subframes = int(np.ceil(reference_bit_index / LNAV_SUBFRAME_BITS))
+        for subframe_index in range(-prefix_subframes, 0):
+            previous_word = append_subframe(prefix, subframe_index, previous_word)
+        prefix = prefix[-reference_bit_index:]
+
+    stream = list(prefix)
+    previous_word: list[int] | None = None
+    subframe_index = 0
+    while len(stream) < num_bits:
+        previous_word = append_subframe(stream, subframe_index, previous_word)
         subframe_index += 1
     return np.asarray(stream[:num_bits], dtype=np.int8)

@@ -91,6 +91,36 @@ def test_lnav_templates_rebuild_continuous_how_timing() -> None:
     assert estimate.subframe_id == 2
 
 
+def test_lnav_templates_can_align_reference_subframe_inside_stream() -> None:
+    rng = np.random.default_rng(13)
+    previous = None
+    templates = []
+    for subframe_id in (1, 2, 3):
+        words = build_synthetic_subframe(subframe_id, 900 + subframe_id, rng, previous)
+        previous = words[-1]
+        templates.append(
+            {
+                "subframe_id": subframe_id,
+                "tow_count": 900 + subframe_id,
+                "words": ["".join(str(bit) for bit in word) for word in words],
+            }
+        )
+
+    bits = build_lnav_bit_stream_from_templates(
+        LNAV_SUBFRAME_BITS * 3,
+        templates,
+        start_tow_count=4321,
+        start_subframe_id=3,
+        reference_bit_index=123,
+    )
+    estimate = find_lnav_tow(bits)
+
+    assert estimate is not None
+    assert estimate.bit_index == 123
+    assert estimate.tow_count == 4321
+    assert estimate.subframe_id == 3
+
+
 def test_lnav_generation_is_deterministic() -> None:
     first = build_lnav_bit_stream(1000, seed=7)
     second = build_lnav_bit_stream(1000, seed=7)

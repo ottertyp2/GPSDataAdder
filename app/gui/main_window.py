@@ -454,10 +454,10 @@ class MainWindow(QMainWindow):
         self.overlay_alt_spin.setValue(350.0)
 
         self.overlay_cn0_spin = QDoubleSpinBox()
-        self.overlay_cn0_spin.setRange(35.0, 60.0)
+        self.overlay_cn0_spin.setRange(35.0, 65.0)
         self.overlay_cn0_spin.setDecimals(1)
         self.overlay_cn0_spin.setSingleStep(1.0)
-        self.overlay_cn0_spin.setValue(50.0)
+        self.overlay_cn0_spin.setValue(56.0)
 
         self.overlay_plan_button = QPushButton("Plan Position Overlay")
         self.overlay_plan_button.setObjectName("detectButton")

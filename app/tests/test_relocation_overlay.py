@@ -7,7 +7,13 @@ import json
 import numpy as np
 
 from app.dsp.lnav import build_synthetic_subframe
-from app.dsp.relocation_overlay import RelocationChannelPlan, RelocationOverlayPlan, add_relocation_overlay_to_file
+from app.dsp.relocation_overlay import (
+    RelocationChannelPlan,
+    RelocationOverlayPlan,
+    add_relocation_overlay_to_file,
+    code_phase_for_range_delta,
+    _shift_code_phase_samples_from_geometry,
+)
 
 
 def _templates() -> tuple[dict[str, object], ...]:
@@ -57,6 +63,7 @@ def test_relocation_overlay_adds_stronger_replica_without_replacing_samples(tmp_
             RelocationChannelPlan(
                 prn=3,
                 doppler_hz=500.0,
+                code_rate_hz=1_023_000.0,
                 original_code_phase_samples=100,
                 code_phase_samples=103,
                 range_delta_m=900.0,
@@ -64,6 +71,8 @@ def test_relocation_overlay_adds_stronger_replica_without_replacing_samples(tmp_
                 amplitude=0.2,
                 start_tow_count=701,
                 start_subframe_id=1,
+                reference_bit_index=0,
+                reference_sample=0,
                 nav_subframes=_templates(),
             ),
         ),
@@ -78,3 +87,26 @@ def test_relocation_overlay_adds_stronger_replica_without_replacing_samples(tmp_
     assert augmented.shape == original.shape
     assert np.max(np.abs(augmented)) > 0.0
     assert metadata["mode"] == "position_relocation_overlay"
+
+
+def test_code_phase_uses_fraunhofer_pseudorange_sign() -> None:
+    assert code_phase_for_range_delta(1000, 12.4, 6061) == 988
+    assert code_phase_for_range_delta(1000, -12.4, 6061) == 1012
+
+
+def test_code_phase_rebased_from_reference_sample() -> None:
+    sample_rate_hz = 6_061_000.0
+    reference_sample = 394_357_576
+    code_rate_hz = 1_023_002.0
+    reference_chips = 770.25
+
+    original, shifted = _shift_code_phase_samples_from_geometry(
+        reference_chips,
+        reference_sample,
+        0.0,
+        code_rate_hz,
+        sample_rate_hz,
+    )
+
+    assert 0 <= original < int(round(sample_rate_hz * 1e-3))
+    assert shifted == original

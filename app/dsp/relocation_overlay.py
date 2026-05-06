@@ -12,6 +12,13 @@ from typing import Callable
 
 import numpy as np
 
+from app.dsp.gps_ca import (
+    CA_CODE_LENGTH,
+    CA_CODE_RATE_HZ,
+    code_phase_samples_to_chips,
+    generate_ca_code,
+    sample_ca_code,
+)
 from app.dsp.lnav import build_lnav_bit_stream_from_templates
 from app.dsp.synthetic_satellite import (
     COMPLEX64_DTYPE,
@@ -23,11 +30,9 @@ from app.dsp.synthetic_satellite import (
     _create_sized_file,
     _effective_in_flight_blocks,
     _effective_worker_count,
-    _generate_synthetic_satellite_block_gpu,
     _load_cupy,
     count_complex64_samples,
     estimate_realistic_amplitude,
-    generate_synthetic_satellite_block,
     resolve_compute_backend,
 )
 from app.dsp.tow_detect import _fraunhofer_project_path
@@ -37,9 +42,9 @@ SPEED_OF_LIGHT_M_S = 299_792_458.0
 WGS84_A_M = 6_378_137.0
 WGS84_F = 1.0 / 298.257223563
 WGS84_E2 = WGS84_F * (2.0 - WGS84_F)
-DEFAULT_RELOCATION_CN0_DBHZ = 50.0
+DEFAULT_RELOCATION_CN0_DBHZ = 56.0
 DEFAULT_RELOCATION_TRACKING_S = 42.0
-DEFAULT_RELOCATION_MAX_SATELLITES = 6
+DEFAULT_RELOCATION_MAX_SATELLITES = 8
 
 
 @dataclass(frozen=True)
@@ -48,6 +53,7 @@ class RelocationChannelPlan:
 
     prn: int
     doppler_hz: float
+    code_rate_hz: float
     original_code_phase_samples: int
     code_phase_samples: int
     range_delta_m: float
@@ -55,6 +61,8 @@ class RelocationChannelPlan:
     amplitude: float
     start_tow_count: int
     start_subframe_id: int
+    reference_bit_index: int
+    reference_sample: int
     nav_subframes: tuple[dict[str, object], ...]
 
 
@@ -162,7 +170,15 @@ def _run_fraunhofer_relocation_analysis(
 import json
 import sys
 
+import numpy as np
+
 from app.dsp.acquisition import acquisition_rank_key, acquisition_result_is_plausible, scan_prns_from_session
+from app.dsp.ephemeris import (
+    decode_ephemeris,
+    rotate_ecef_for_transit,
+    satellite_clock_correction_s,
+    satellite_position_ecef_m,
+)
 from app.dsp.io import Complex64FileSource
 from app.dsp.navdecode import decode_navigation_from_tracking
 from app.dsp.pvt import compute_pvt_from_navigation
@@ -175,6 +191,51 @@ backend = sys.argv[3]
 max_workers = int(sys.argv[4])
 tracking_s = float(sys.argv[5])
 max_satellites = int(sys.argv[6])
+CA_CODE_LENGTH = 1023.0
+CA_CODE_RATE_HZ = 1_023_000.0
+
+
+def unwrap_code_phase_chips(values):
+    values = np.asarray(values, dtype=np.float64)
+    if values.size == 0:
+        return values
+    unwrapped = np.empty(values.size, dtype=np.float64)
+    unwrapped[0] = values[0]
+    previous_raw = values[0]
+    for index in range(1, values.size):
+        raw_delta = values[index] - previous_raw
+        delta = ((raw_delta + CA_CODE_LENGTH * 0.5) % CA_CODE_LENGTH) - CA_CODE_LENGTH * 0.5
+        unwrapped[index] = unwrapped[index - 1] + delta
+        previous_raw = values[index]
+    return unwrapped
+
+
+def fit_code_phase_at_ms(tracking, reference_ms):
+    phases = None if tracking is None else tracking.loop_states.get("code_phase_chips")
+    if phases is None or not (0 <= int(reference_ms) < len(phases)):
+        return None
+    reference_ms = int(reference_ms)
+    lo = max(0, reference_ms - 10000)
+    hi = min(len(phases), reference_ms + 10000)
+    indices = np.arange(lo, hi, dtype=np.float64)
+    values = np.asarray(phases[lo:hi], dtype=np.float64)
+    mask = np.isfinite(values)
+    if int(np.count_nonzero(mask)) < 100:
+        raw_phase = float(phases[reference_ms]) % CA_CODE_LENGTH
+        return raw_phase, CA_CODE_RATE_HZ
+    indices = indices[mask]
+    values = values[mask]
+    unwrapped = unwrap_code_phase_chips(values)
+    centered_ms = indices - float(reference_ms)
+    slope_chips_per_ms, phase_at_reference = np.polyfit(centered_ms, unwrapped, 1)
+    code_rate_hz = CA_CODE_RATE_HZ + float(slope_chips_per_ms) * 1000.0
+    if not np.isfinite(code_rate_hz) or not (1_022_500.0 <= code_rate_hz <= 1_023_500.0):
+        freqs = None if tracking is None else tracking.loop_states.get("prompt_code_freq_hz")
+        if freqs is not None and 0 <= reference_ms < len(freqs) and float(freqs[reference_ms]) > 0.0:
+            code_rate_hz = float(freqs[reference_ms])
+        else:
+            code_rate_hz = CA_CODE_RATE_HZ
+    return float(phase_at_reference % CA_CODE_LENGTH), float(code_rate_hz)
 
 source = Complex64FileSource(file_path)
 start_sample = int(round(60.0 * sample_rate))
@@ -210,7 +271,6 @@ tracking_by_prn = {}
 bit_by_prn = {}
 nav_by_prn = {}
 absolute_start_by_prn = {}
-pvt_result = None
 for acquisition in ranked:
     local = SessionConfig(
         file_path=file_path,
@@ -228,17 +288,16 @@ for acquisition in ranked:
     bit_by_prn[int(acquisition.prn)] = bit_result
     nav_by_prn[int(acquisition.prn)] = nav_result
     absolute_start_by_prn[int(acquisition.prn)] = int(absolute_start)
-    candidate = compute_pvt_from_navigation(tracking_by_prn, bit_by_prn, nav_by_prn)
-    if candidate.solution is not None:
-        pvt_result = candidate
-        break
+
+pvt_result = compute_pvt_from_navigation(tracking_by_prn, bit_by_prn, nav_by_prn)
 
 if pvt_result is None or pvt_result.solution is None:
     raise RuntimeError("Fraunhofer_FHR did not decode enough ephemerides for a PVT relocation plan.")
 
 channels = []
-used_prns = [int(obs.prn) for obs in pvt_result.observations]
-for prn in used_prns:
+obs_by_prn = {int(obs.prn): obs for obs in pvt_result.observations}
+target_transmit_time_s = float(sorted(obs.transmit_time_s for obs in pvt_result.observations)[len(pvt_result.observations) // 2])
+for prn in sorted(nav_by_prn):
     acquisition = acquisition_by_prn.get(prn)
     nav_result = nav_by_prn.get(prn)
     bit_result = bit_by_prn.get(prn)
@@ -259,25 +318,50 @@ for prn in used_prns:
                 "subframe_id": int(subframe.subframe_id),
                 "tow_count": int(subframe.tow_seconds) // 6,
                 "tow_seconds": int(subframe.tow_seconds),
+                "bit_start_ms": int(bit_ms),
                 "file_time_s": float(file_time_s),
                 "words": [word.bits for word in subframe.words],
             }
         )
     if not {1, 2, 3}.issubset({int(item["subframe_id"]) for item in templates}):
         continue
-    obs = next((item for item in pvt_result.observations if int(item.prn) == prn), None)
-    if obs is None:
-        continue
+    obs = obs_by_prn.get(prn)
+    if obs is not None:
+        satellite_position_m = [float(value) for value in obs.satellite_position_m]
+    else:
+        ephemeris = decode_ephemeris(prn, nav_result.subframes)
+        if ephemeris is None:
+            continue
+        clock_s = satellite_clock_correction_s(ephemeris, target_transmit_time_s)
+        corrected_transmit_s = target_transmit_time_s - clock_s
+        satellite_position = satellite_position_ecef_m(ephemeris, corrected_transmit_s)
+        transit_s = float(
+            sum((float(a) - float(b)) ** 2 for a, b in zip(satellite_position, pvt_result.solution.ecef_m)) ** 0.5
+        ) / 299792458.0
+        satellite_position = rotate_ecef_for_transit(satellite_position, transit_s)
+        satellite_position_m = [float(value) for value in satellite_position]
     first_template = sorted(templates, key=lambda item: float(item["file_time_s"]))[0]
-    subframe_offset = int(round(float(first_template["file_time_s"]) / 6.0))
+    reference_sample = int(round(float(first_template["file_time_s"]) * float(sample_rate)))
+    tracking = tracking_by_prn.get(prn)
+    reference_code_phase_chips = None
+    code_rate_hz = CA_CODE_RATE_HZ
+    if tracking is not None:
+        reference_ms = int(first_template["bit_start_ms"])
+        fit = fit_code_phase_at_ms(tracking, reference_ms)
+        if fit is not None:
+            reference_code_phase_chips, code_rate_hz = fit
+    if reference_code_phase_chips is None:
+        reference_code_phase_chips = float(acquisition.best_candidate.code_phase_samples) / float(sample_rate) * CA_CODE_RATE_HZ
     channels.append(
         {
             "prn": prn,
             "doppler_hz": float(acquisition.best_candidate.doppler_hz),
-            "code_phase_samples": int(acquisition.best_candidate.code_phase_samples),
-            "satellite_position_m": [float(value) for value in obs.satellite_position_m],
-            "start_tow_count": int((int(first_template["tow_count"]) - subframe_offset) % (604800 // 6)),
-            "start_subframe_id": int(((int(first_template["subframe_id"]) - 1 - subframe_offset) % 5) + 1),
+            "reference_code_phase_chips": float(reference_code_phase_chips),
+            "code_rate_hz": float(code_rate_hz),
+            "satellite_position_m": satellite_position_m,
+            "start_tow_count": int(first_template["tow_count"]),
+            "start_subframe_id": int(first_template["subframe_id"]),
+            "reference_file_time_s": float(first_template["file_time_s"]),
             "nav_subframes": templates,
         }
     )
@@ -385,18 +469,26 @@ def plan_relocation_overlay(
         sample_rate_hz=sample_rate_hz,
         target_cn0_dbhz=target_cn0_dbhz,
     )
-    samples_per_ms = max(1, int(round(float(sample_rate_hz) * 1e-3)))
     channels: list[RelocationChannelPlan] = []
     for raw_channel in analysis["channels"]:
         satellite = np.asarray(raw_channel["satellite_position_m"], dtype=np.float64)
         range_delta_m = float(np.linalg.norm(satellite - target_ecef) - np.linalg.norm(satellite - baseline_ecef))
         range_delta_samples = range_delta_m / SPEED_OF_LIGHT_M_S * float(sample_rate_hz)
-        original_code_phase = int(raw_channel["code_phase_samples"])
-        shifted_code_phase = int(round(original_code_phase + range_delta_samples)) % samples_per_ms
+        reference_sample = int(round(float(raw_channel["reference_file_time_s"]) * float(sample_rate_hz)))
+        reference_bit_index = int(np.ceil(reference_sample * NAV_BIT_RATE_BPS / float(sample_rate_hz)))
+        code_rate_hz = float(raw_channel.get("code_rate_hz", CA_CODE_RATE_HZ))
+        original_code_phase, shifted_code_phase = _shift_code_phase_samples_from_geometry(
+            float(raw_channel["reference_code_phase_chips"]),
+            reference_sample,
+            range_delta_m,
+            code_rate_hz,
+            sample_rate_hz,
+        )
         channels.append(
             RelocationChannelPlan(
                 prn=int(raw_channel["prn"]),
                 doppler_hz=float(raw_channel["doppler_hz"]),
+                code_rate_hz=code_rate_hz,
                 original_code_phase_samples=original_code_phase,
                 code_phase_samples=shifted_code_phase,
                 range_delta_m=range_delta_m,
@@ -404,6 +496,8 @@ def plan_relocation_overlay(
                 amplitude=float(amplitude_estimate.amplitude),
                 start_tow_count=int(raw_channel["start_tow_count"]),
                 start_subframe_id=int(raw_channel["start_subframe_id"]),
+                reference_bit_index=reference_bit_index,
+                reference_sample=reference_sample,
                 nav_subframes=tuple(dict(item) for item in raw_channel["nav_subframes"]),
             )
         )
@@ -447,6 +541,155 @@ def _required_nav_bits(total_samples: int, sample_rate_hz: float) -> int:
     return max(1, int(np.ceil(float(total_samples) / float(sample_rate_hz) * NAV_BIT_RATE_BPS)) + 2)
 
 
+def code_phase_for_range_delta(
+    original_code_phase_samples: int,
+    range_delta_samples: float,
+    samples_per_ms: int,
+) -> int:
+    """Map a desired pseudorange delta to Fraunhofer-compatible code phase.
+
+    Fraunhofer_FHR forms receive time as bit time minus tracked code-phase
+    offset. A larger local code phase therefore reduces pseudorange, so the
+    synthetic replica must move in the opposite direction of the range delta.
+    """
+
+    if samples_per_ms <= 0:
+        raise ValueError("samples_per_ms must be positive.")
+    return int(round(float(original_code_phase_samples) - float(range_delta_samples))) % int(samples_per_ms)
+
+
+def _code_phase_chips_to_samples(code_phase_chips: float, sample_rate_hz: float) -> int:
+    samples_per_ms = max(1, int(round(float(sample_rate_hz) * 1e-3)))
+    wrapped_chips = float(code_phase_chips) % float(CA_CODE_LENGTH)
+    return int(round(wrapped_chips * float(samples_per_ms) / float(CA_CODE_LENGTH))) % samples_per_ms
+
+
+def _file_start_code_phase_chips(
+    reference_code_phase_chips: float,
+    reference_sample: int,
+    code_rate_hz: float,
+    sample_rate_hz: float,
+) -> float:
+    if not np.isfinite(code_rate_hz) or code_rate_hz <= 0.0:
+        raise ValueError("Code rate must be positive.")
+    return (
+        float(reference_code_phase_chips) - float(reference_sample) * float(code_rate_hz) / float(sample_rate_hz)
+    ) % float(CA_CODE_LENGTH)
+
+
+def _shift_code_phase_samples_from_geometry(
+    reference_code_phase_chips: float,
+    reference_sample: int,
+    range_delta_m: float,
+    code_rate_hz: float,
+    sample_rate_hz: float,
+) -> tuple[int, int]:
+    baseline_chips = _file_start_code_phase_chips(
+        reference_code_phase_chips,
+        reference_sample,
+        code_rate_hz,
+        sample_rate_hz,
+    )
+    range_delta_chips = float(range_delta_m) / SPEED_OF_LIGHT_M_S * float(code_rate_hz)
+    shifted_chips = (baseline_chips - range_delta_chips) % float(CA_CODE_LENGTH)
+    return (
+        _code_phase_chips_to_samples(baseline_chips, sample_rate_hz),
+        _code_phase_chips_to_samples(shifted_chips, sample_rate_hz),
+    )
+
+
+def _nav_bit_indices(
+    start_sample: int,
+    sample_count: int,
+    sample_rate_hz: float,
+    reference_sample: int,
+    reference_bit_index: int,
+) -> np.ndarray:
+    absolute_samples = int(start_sample) + np.arange(int(sample_count), dtype=np.float64)
+    shifted_samples = absolute_samples - float(reference_sample)
+    return (
+        np.floor(shifted_samples * NAV_BIT_RATE_BPS / float(sample_rate_hz)).astype(np.int64)
+        + int(reference_bit_index)
+    )
+
+
+def _generate_relocation_satellite_block(
+    config: SyntheticSatelliteConfig,
+    start_sample: int,
+    sample_count: int,
+    nav_bits: np.ndarray,
+    reference_sample: int,
+    reference_bit_index: int,
+    code_rate_hz: float,
+) -> np.ndarray:
+    if sample_count == 0:
+        return np.empty(0, dtype=np.complex64)
+
+    absolute_samples = start_sample + np.arange(sample_count, dtype=np.float64)
+    code_phase_chips = code_phase_samples_to_chips(config.code_phase_samples, config.sample_rate_hz)
+    block_code_phase = code_phase_chips + (float(start_sample) * code_rate_hz / config.sample_rate_hz)
+    code = sample_ca_code(
+        config.prn,
+        config.sample_rate_hz,
+        sample_count,
+        code_phase_chips=block_code_phase,
+        code_rate_hz=code_rate_hz,
+    )
+    bit_indices = _nav_bit_indices(
+        start_sample,
+        sample_count,
+        config.sample_rate_hz,
+        reference_sample,
+        reference_bit_index,
+    )
+    if bit_indices.size and (int(bit_indices.min()) < 0 or int(bit_indices.max()) >= nav_bits.size):
+        raise ValueError("Navigation bit stream is too short for requested relocation block.")
+    nav_symbols = (1 - 2 * nav_bits[bit_indices]).astype(np.float32)
+
+    phase_rad = np.deg2rad(config.carrier_phase_deg)
+    phase = 2.0 * np.pi * config.doppler_hz * absolute_samples / config.sample_rate_hz + phase_rad
+    carrier = np.empty(sample_count, dtype=np.complex64)
+    carrier.real = np.cos(phase).astype(np.float32)
+    carrier.imag = np.sin(phase).astype(np.float32)
+    carrier *= (float(config.amplitude) * code * nav_symbols).astype(np.float32)
+    return carrier
+
+
+def _generate_relocation_satellite_block_gpu(
+    config: SyntheticSatelliteConfig,
+    start_sample: int,
+    sample_count: int,
+    nav_bits: np.ndarray,
+    reference_sample: int,
+    reference_bit_index: int,
+    code_rate_hz: float,
+):
+    cp = _load_cupy()
+    if sample_count == 0:
+        return cp.empty(0, dtype=cp.complex64)
+
+    absolute_samples = start_sample + cp.arange(sample_count, dtype=cp.float64)
+    code_phase_chips = code_phase_samples_to_chips(config.code_phase_samples, config.sample_rate_hz)
+    block_code_phase = code_phase_chips + (float(start_sample) * code_rate_hz / config.sample_rate_hz)
+    base_code = cp.asarray(generate_ca_code(config.prn), dtype=cp.float32)
+    chip_positions = block_code_phase + (cp.arange(sample_count, dtype=cp.float64) * code_rate_hz / config.sample_rate_hz)
+    chip_indices = cp.floor(chip_positions).astype(cp.int64) % 1023
+    code = base_code[chip_indices]
+
+    nav_gpu = cp.asarray(nav_bits, dtype=cp.int8)
+    shifted_samples = absolute_samples - float(reference_sample)
+    bit_indices = cp.floor(shifted_samples * NAV_BIT_RATE_BPS / config.sample_rate_hz).astype(cp.int64) + int(reference_bit_index)
+    nav_symbols = (1 - 2 * nav_gpu[bit_indices]).astype(cp.float32)
+
+    phase_rad = np.deg2rad(config.carrier_phase_deg)
+    phase = 2.0 * cp.pi * config.doppler_hz * absolute_samples / config.sample_rate_hz + phase_rad
+    carrier = cp.empty(sample_count, dtype=cp.complex64)
+    carrier.real = cp.cos(phase).astype(cp.float32)
+    carrier.imag = cp.sin(phase).astype(cp.float32)
+    carrier *= (float(config.amplitude) * code * nav_symbols).astype(cp.float32)
+    return carrier
+
+
 def _mix_relocation_block(
     data: np.ndarray,
     plan: RelocationOverlayPlan,
@@ -467,11 +710,14 @@ def _mix_relocation_block(
                 start_subframe_id=channel.start_subframe_id,
                 nav_seed=channel.prn,
             )
-            mixed_gpu += _generate_synthetic_satellite_block_gpu(
+            mixed_gpu += _generate_relocation_satellite_block_gpu(
                 config,
                 start_sample,
                 int(data.size),
                 nav_bits_by_prn[channel.prn],
+                channel.reference_sample,
+                channel.reference_bit_index,
+                channel.code_rate_hz,
             )
         return cp.asnumpy(mixed_gpu).astype(np.complex64, copy=False)
 
@@ -487,11 +733,14 @@ def _mix_relocation_block(
             start_subframe_id=channel.start_subframe_id,
             nav_seed=channel.prn,
         )
-        mixed += generate_synthetic_satellite_block(
+        mixed += _generate_relocation_satellite_block(
             config,
             start_sample,
             int(data.size),
             nav_bits_by_prn[channel.prn],
+            channel.reference_sample,
+            channel.reference_bit_index,
+            channel.code_rate_hz,
         )
     return mixed.astype(np.complex64, copy=False)
 
@@ -534,6 +783,7 @@ def add_relocation_overlay_to_file(
             channel.nav_subframes,
             start_tow_count=channel.start_tow_count,
             start_subframe_id=channel.start_subframe_id,
+            reference_bit_index=channel.reference_bit_index,
         )
         for channel in plan.channels
     }
