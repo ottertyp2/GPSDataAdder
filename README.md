@@ -73,6 +73,8 @@ Use manual amplitude only when you want a deliberately strong or weak stress cas
 
 The `Position Overlay` panel adds stronger synthetic replicas of already received satellites to a new local output file. It never removes or edits samples in the source recording. The planner uses `Fraunhofer_FHR` to decode a baseline PVT solution, the received PRNs, and their LNAV ephemeris words. It then computes code-phase shifts for a selected target coordinate or a small east/north/up offset, regenerates continuous TLM/HOW timing aligned to the measurement file time, reuses the decoded ephemeris payload words, and writes a multi-PRN overlay. When the backend resolves to GPU, the overlay writer mixes the synthetic PRN replicas on CUDA/CuPy block by block.
 
+The overlay keeps fractional C/A code phase internally and adjusts each replica code rate for the target-vs-baseline range-rate difference reported through the Fraunhofer-derived satellite geometry. The integer code-phase samples shown in logs and metadata are kept as decoder-friendly summaries, but the block synthesizer uses the higher precision chip phase.
+
 Use `Use offset from detected PVT` for first tests. A few kilometres is the intended initial range because the overlay shifts pseudoranges by code phase while keeping the decoded source ephemerides. `Write Position Overlay` uses the visible output path and writes metadata to `<output>.relocation.json` when metadata is enabled.
 
 ## CLI Usage
@@ -138,6 +140,16 @@ python -m app.main input.bin output.bin --no-metadata
 ```powershell
 pytest app/tests
 ```
+
+## Doxygen Documentation
+
+Source documentation is configured for Doxygen:
+
+```powershell
+doxygen Doxyfile
+```
+
+The generated HTML goes to `docs/doxygen-output/html` and is ignored by Git. The committed documentation sources are `Doxyfile`, `docs/mainpage.dox`, and the Python docstrings.
 
 ## Development Workflow
 

@@ -1,0 +1,142 @@
+/** \mainpage GPSDataAdder Code Documentation
+
+\section scope Scope
+
+GPSDataAdder is an offline GPS L1 C/A IQ-file augmentation tool. It reads local
+little-endian complex64 recordings, generates deterministic synthetic GPS
+signals, and can add a multi-satellite position relocation overlay for decoder
+testing. The project deliberately avoids SDR control, transmission, live stream
+handling, or network assistance.
+
+This Doxygen set documents the Python package under \c app, repository support
+files, and the high-level design notes below. Build it with:
+
+\code{.ps1}
+doxygen Doxyfile
+\endcode
+
+Generated HTML is written under \c docs/doxygen-output/html and is ignored by
+Git. The Doxygen source files and Python docstrings are the committed
+documentation artifacts.
+
+\section workflow End-To-End Workflow
+
+1. \c app/main.py starts either the PySide6 GUI or the CLI fallback.
+2. \c app/gui/main_window.py collects file paths, signal settings, processing
+   settings, and position-overlay parameters.
+3. \c app/gui/workers.py moves detection, planning, and file writing into
+   background threads so the GUI stays responsive.
+4. \c app/dsp/synthetic_satellite.py estimates amplitude, generates one
+   deterministic GPS L1 C/A channel, and writes blockwise complex64 output.
+5. \c app/dsp/tow_detect.py optionally asks the sibling Fraunhofer_FHR project
+   for fast TOW evidence from real captures.
+6. \c app/dsp/relocation_overlay.py asks Fraunhofer_FHR for baseline PVT,
+   decoded received PRNs, ephemeris templates, code tracking, and satellite
+   geometry, then writes stronger received-PRN replicas for a target position.
+7. \c app/tests keeps C/A generation, LNAV parity, synthetic-file writing, and
+   relocation-overlay behavior covered by focused pytest cases.
+
+\section dsp DSP Modules
+
+\subsection gpsca app/dsp/gps_ca.py
+
+Generates GPS L1 C/A PRN chips for PRNs 1 through 32 and samples local code
+replicas at arbitrary sample rates and code rates.
+
+\subsection lnav app/dsp/lnav.py
+
+Builds deterministic LNAV-like bit streams with valid GPS parity, creates
+synthetic subframes, detects HOW/TOW evidence in hard-bit streams, and rebuilds
+continuous LNAV streams from decoded source subframe templates.
+
+\subsection synthetic app/dsp/synthetic_satellite.py
+
+Contains the single-satellite augmentation path: input validation, complex64
+file sizing, automatic amplitude estimation, compute backend selection, CPU/GPU
+block synthesis, metadata generation, and detect-first planning.
+
+\subsection tow app/dsp/tow_detect.py
+
+Provides measurement TOW discovery. It first consumes sidecar metadata when
+available, then tries Fraunhofer_FHR fast navigation decoding for long captures,
+then falls back to a lightweight local acquisition/tracking/HOW scan.
+
+\subsection relocation app/dsp/relocation_overlay.py
+
+Builds and writes the position relocation overlay. It converts WGS-84
+coordinates, calls Fraunhofer_FHR for baseline PVT and navigation evidence,
+computes target pseudorange deltas, preserves fractional C/A phase, compensates
+range-delta rate in the synthetic code rate, and mixes multiple received-PRN
+replicas block by block.
+
+\section gui GUI Modules
+
+\subsection mainwindow app/gui/main_window.py
+
+Owns the PySide6 interface: input/output paths, synthetic satellite controls,
+position-overlay controls, progress state, logging, worker lifecycle, and result
+summaries.
+
+\subsection workers app/gui/workers.py
+
+Defines QThread workers for synthetic writing, detect-first planning,
+relocation planning, and relocation writing. Workers expose progress, messages,
+success, cancellation, and failure signals.
+
+\section tests Tests
+
+\subsection testgpsca app/tests/test_gps_ca.py
+
+Checks PRN generation, reference C/A behavior, sampling, caching, and validation.
+
+\subsection testlnav app/tests/test_lnav.py
+
+Checks LNAV parity, HOW/TOW parsing, deterministic bit generation, and template
+stream rebuilding.
+
+\subsection testsynthetic app/tests/test_synthetic_satellite.py
+
+Checks file augmentation, metadata payloads, auto amplitude, detection planning,
+compute backend selection, cancellation cleanup, and invalid input handling.
+
+\subsection testrelocation app/tests/test_relocation_overlay.py
+
+Checks multi-PRN overlay writing, Fraunhofer-compatible pseudorange sign,
+reference-sample rebasing, fractional code phase, and range-rate code-rate
+compensation.
+
+\subsection testgui app/tests/test_gui_smoke.py
+
+Checks that the GUI constructs, important controls exist, and worker-facing
+defaults remain usable without running long DSP jobs.
+
+\section external Fraunhofer_FHR Interface
+
+GPSDataAdder uses the sibling \c Fraunhofer_FHR repository as an offline decoder
+oracle when it is present next to this project or configured through
+\c FRAUNHOFER_FHR_PATH. The interface is intentionally one-way and offline:
+GPSDataAdder launches small Python subprocesses inside Fraunhofer_FHR, receives
+JSON evidence, and never imports long-running GUI state from that project.
+
+The relocation overlay uses Fraunhofer_FHR for:
+
+- acquisition ranking of received PRNs,
+- tracking-loop code phase and code-rate evidence,
+- LNAV bit and subframe decoding,
+- ephemeris extraction,
+- baseline PVT solution,
+- apparent satellite position and velocity evidence.
+
+\section build Build And Verification
+
+Use the normal test and documentation commands from the repository root:
+
+\code{.ps1}
+pytest app/tests
+doxygen Doxyfile
+\endcode
+
+The Doxygen command requires Doxygen to be installed on the machine. Generated
+HTML stays local under \c docs/doxygen-output/html.
+
+*/

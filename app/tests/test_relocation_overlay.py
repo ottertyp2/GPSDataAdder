@@ -10,10 +10,15 @@ from app.dsp.lnav import build_synthetic_subframe
 from app.dsp.relocation_overlay import (
     RelocationChannelPlan,
     RelocationOverlayPlan,
+    SPEED_OF_LIGHT_M_S,
     add_relocation_overlay_to_file,
     code_phase_for_range_delta,
+    _generate_relocation_satellite_block,
+    _shift_code_phase_from_geometry,
     _shift_code_phase_samples_from_geometry,
+    _synthetic_code_rate_hz,
 )
+from app.dsp.synthetic_satellite import SyntheticSatelliteConfig
 
 
 def _templates() -> tuple[dict[str, object], ...]:
@@ -110,3 +115,61 @@ def test_code_phase_rebased_from_reference_sample() -> None:
 
     assert 0 <= original < int(round(sample_rate_hz * 1e-3))
     assert shifted == original
+
+
+def test_fractional_code_phase_preserves_sub_sample_geometry() -> None:
+    sample_rate_hz = 6_061_000.0
+    source_code_rate_hz = 1_023_000.0
+    range_delta_m = SPEED_OF_LIGHT_M_S * 0.05 / source_code_rate_hz
+
+    shift = _shift_code_phase_from_geometry(
+        reference_code_phase_chips=100.0,
+        reference_sample=0,
+        range_delta_m=range_delta_m,
+        source_code_rate_hz=source_code_rate_hz,
+        synthetic_code_rate_hz=source_code_rate_hz,
+        sample_rate_hz=sample_rate_hz,
+    )
+
+    assert shift.original_code_phase_samples == shift.code_phase_samples
+    assert np.isclose((shift.original_code_phase_chips - shift.code_phase_chips) % 1023.0, 0.05)
+
+
+def test_range_rate_compensation_adjusts_code_rate_sign() -> None:
+    source_code_rate_hz = 1_023_000.0
+
+    assert _synthetic_code_rate_hz(source_code_rate_hz, 100.0) < source_code_rate_hz
+    assert _synthetic_code_rate_hz(source_code_rate_hz, -100.0) > source_code_rate_hz
+
+
+def test_relocation_generator_uses_fractional_code_phase() -> None:
+    config = SyntheticSatelliteConfig(
+        sample_rate_hz=6_138_000.0,
+        prn=3,
+        doppler_hz=0.0,
+        code_phase_samples=0,
+        amplitude=1.0,
+    )
+    nav_bits = np.zeros(10, dtype=np.int8)
+
+    rounded = _generate_relocation_satellite_block(
+        config,
+        start_sample=0,
+        sample_count=128,
+        nav_bits=nav_bits,
+        reference_sample=0,
+        reference_bit_index=0,
+        code_rate_hz=1_023_000.0,
+    )
+    fractional = _generate_relocation_satellite_block(
+        config,
+        start_sample=0,
+        sample_count=128,
+        nav_bits=nav_bits,
+        reference_sample=0,
+        reference_bit_index=0,
+        code_rate_hz=1_023_000.0,
+        initial_code_phase_chips=0.5,
+    )
+
+    assert not np.array_equal(rounded, fractional)

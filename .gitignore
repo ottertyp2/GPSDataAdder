@@ -13,3 +13,4 @@ venv/
 *.json
 !.agents/**/*.json
 !tools/**/*.json
+docs/doxygen-output/

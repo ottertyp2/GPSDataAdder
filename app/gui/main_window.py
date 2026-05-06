@@ -717,6 +717,7 @@ class MainWindow(QMainWindow):
         for channel in getattr(result, "channels"):
             self._append_log(
                 f"  PRN {channel.prn}: range delta {channel.range_delta_m:.1f} m, "
+                f"range-rate delta {channel.range_delta_rate_m_s:+.3f} m/s, "
                 f"code phase {channel.original_code_phase_samples}->{channel.code_phase_samples}."
             )
         self.relocation_plan_worker = None
