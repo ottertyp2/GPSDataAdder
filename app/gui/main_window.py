@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QStyle,
     QVBoxLayout,
@@ -46,8 +48,8 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("GPSDataAdder")
-        self.resize(1000, 780)
-        self.setMinimumSize(960, 740)
+        self.resize(1180, 820)
+        self.setMinimumSize(900, 680)
         self.worker: AddSyntheticWorker | None = None
         self.detect_worker: DetectPlanWorker | None = None
         self.relocation_plan_worker: RelocationPlanWorker | None = None
@@ -59,15 +61,27 @@ class MainWindow(QMainWindow):
         root.setObjectName("root")
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
 
         layout.addWidget(self._build_header())
-        layout.addWidget(self._build_file_group())
-        layout.addWidget(self._build_signal_group())
-        layout.addWidget(self._build_relocation_group())
-        layout.addWidget(self._build_run_group())
-        layout.addStretch(1)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("contentScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll_content = QWidget()
+        scroll_content.setObjectName("scrollContent")
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(12)
+        scroll_layout.addWidget(self._build_file_group())
+        scroll_layout.addWidget(self._build_signal_group())
+        scroll_layout.addWidget(self._build_relocation_group())
+        scroll_layout.addWidget(self._build_run_group())
+        scroll_layout.addStretch(1)
+        scroll.setWidget(scroll_content)
+        layout.addWidget(scroll, 1)
         self._apply_style()
 
     def _standard_icon(self, standard_icon: QStyle.StandardPixmap):
@@ -77,7 +91,7 @@ class MainWindow(QMainWindow):
         header = QWidget()
         header.setObjectName("headerPanel")
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setContentsMargins(18, 14, 18, 14)
         title = QLabel("GPSDataAdder")
         title.setObjectName("appTitle")
         self.header_state_label = QLabel("Ready")
@@ -87,21 +101,48 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.header_state_label)
         return header
 
+    def _configure_field(self, widget: QWidget, wide: bool = False) -> QWidget:
+        widget.setMinimumHeight(34)
+        if wide:
+            widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        else:
+            widget.setMinimumWidth(180)
+            widget.setMaximumWidth(260)
+            widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        return widget
+
+    def _configure_form(self, form: QFormLayout) -> QFormLayout:
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(10)
+        return form
+
+    def _section_label(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("sectionLabel")
+        return label
+
     def _apply_style(self) -> None:
         self.setStyleSheet(
             """
             QMainWindow, QWidget#root {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #eef1f5, stop:1 #dde3ec);
+                background: #eef2f7;
                 color: #172033;
                 font-family: "Segoe UI", "Inter", "Roboto", sans-serif;
+            }
+            QScrollArea#contentScroll {
+                background: transparent;
+            }
+            QWidget#scrollContent {
+                background: transparent;
             }
             QWidget {
                 font-size: 10pt;
             }
             QWidget#headerPanel {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #0f172a, stop:1 #1e293b);
+                background: #111827;
                 border-radius: 8px;
             }
             QLabel#appTitle {
@@ -119,10 +160,10 @@ class MainWindow(QMainWindow):
             }
             QGroupBox {
                 background: #ffffff;
-                border: 1px solid #e2e8f0;
+                border: 1px solid #d7e0ea;
                 border-radius: 8px;
-                margin-top: 22px;
-                padding: 14px;
+                margin-top: 20px;
+                padding: 18px 16px 16px 16px;
                 font-weight: 700;
                 font-size: 10pt;
             }
@@ -132,11 +173,18 @@ class MainWindow(QMainWindow):
                 padding: 0 6px;
                 color: #0f172a;
             }
+            QLabel#sectionLabel {
+                color: #334155;
+                font-size: 9pt;
+                font-weight: 800;
+                text-transform: uppercase;
+                padding-bottom: 2px;
+            }
             QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
-                background: #f8fafc;
+                background: #fbfdff;
                 border: 1px solid #cbd5e1;
                 border-radius: 5px;
-                padding: 6px 8px;
+                padding: 5px 8px;
                 min-height: 24px;
                 selection-background-color: #3b82f6;
             }
@@ -149,8 +197,14 @@ class MainWindow(QMainWindow):
                 border: 1px solid #cbd5e1;
                 border-radius: 6px;
                 color: #1e293b;
-                padding: 8px 14px;
+                padding: 8px 13px;
                 font-weight: 600;
+            }
+            QPushButton#iconButton {
+                min-width: 38px;
+                max-width: 38px;
+                min-height: 32px;
+                padding: 4px;
             }
             QPushButton:hover:enabled {
                 background: #e2e8f0;
@@ -213,8 +267,7 @@ class MainWindow(QMainWindow):
                 font-size: 9pt;
             }
             QLabel#planSummary {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #eff6ff, stop:1 #f0f9ff);
+                background: #eef6ff;
                 border: 1px solid #bfdbfe;
                 border-left: 5px solid #3b82f6;
                 border-radius: 6px;
@@ -239,8 +292,8 @@ class MainWindow(QMainWindow):
                 border-radius: 5px;
             }
             QPlainTextEdit {
-                background: #0f172a;
-                border: 1px solid #1e293b;
+                background: #111827;
+                border: 1px solid #253044;
                 border-radius: 6px;
                 color: #e2e8f0;
                 font-family: Consolas, "Cascadia Code", "Courier New", monospace;
@@ -269,8 +322,11 @@ class MainWindow(QMainWindow):
     def _build_file_group(self) -> QGroupBox:
         group = QGroupBox("Dateien")
         grid = QGridLayout(group)
+        grid.setContentsMargins(10, 14, 10, 10)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(10)
 
-        self.input_edit = QLineEdit()
+        self.input_edit = self._configure_field(QLineEdit(), wide=True)
         self.input_edit.setPlaceholderText("Eingabe: complex64 .bin/.dat/.iq")
         self.input_edit.textChanged.connect(self._input_changed)
         input_button = QPushButton()
@@ -279,7 +335,7 @@ class MainWindow(QMainWindow):
         input_button.setToolTip("Eingabedatei waehlen")
         input_button.clicked.connect(self._choose_input)
 
-        self.output_edit = QLineEdit()
+        self.output_edit = self._configure_field(QLineEdit(), wide=True)
         self.output_edit.setPlaceholderText("Ausgabe: neue augmented Datei")
         self.output_edit.textEdited.connect(self._output_edited)
         output_button = QPushButton()
@@ -292,10 +348,10 @@ class MainWindow(QMainWindow):
         self.file_info_label.setObjectName("subtleLabel")
         self.file_info_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
-        grid.addWidget(QLabel("Input"), 0, 0)
+        grid.addWidget(QLabel("Input"), 0, 0, Qt.AlignmentFlag.AlignVCenter)
         grid.addWidget(self.input_edit, 0, 1)
         grid.addWidget(input_button, 0, 2)
-        grid.addWidget(QLabel("Output"), 1, 0)
+        grid.addWidget(QLabel("Output"), 1, 0, Qt.AlignmentFlag.AlignVCenter)
         grid.addWidget(self.output_edit, 1, 1)
         grid.addWidget(output_button, 1, 2)
         grid.addWidget(self.file_info_label, 2, 1, 1, 2)
@@ -305,30 +361,33 @@ class MainWindow(QMainWindow):
     def _build_signal_group(self) -> QGroupBox:
         group = QGroupBox("Synthetischer Satellit")
         grid = QGridLayout(group)
+        grid.setContentsMargins(10, 14, 10, 10)
+        grid.setHorizontalSpacing(28)
+        grid.setVerticalSpacing(8)
 
-        self.sample_rate_spin = QDoubleSpinBox()
+        self.sample_rate_spin = self._configure_field(QDoubleSpinBox())
         self.sample_rate_spin.setRange(1.0, 200_000_000.0)
         self.sample_rate_spin.setDecimals(4)
         self.sample_rate_spin.setSingleStep(1000.0)
         self.sample_rate_spin.setValue(DEFAULT_SAMPLE_RATE_HZ)
         self.sample_rate_spin.valueChanged.connect(self._update_file_info)
 
-        self.prn_spin = QSpinBox()
+        self.prn_spin = self._configure_field(QSpinBox())
         self.prn_spin.setRange(1, 32)
         self.prn_spin.setValue(22)
         self.prn_spin.valueChanged.connect(self._maybe_update_output_path)
 
-        self.doppler_spin = QDoubleSpinBox()
+        self.doppler_spin = self._configure_field(QDoubleSpinBox())
         self.doppler_spin.setRange(-250_000.0, 250_000.0)
         self.doppler_spin.setDecimals(2)
         self.doppler_spin.setSingleStep(250.0)
         self.doppler_spin.setValue(1500.0)
 
-        self.code_phase_spin = QSpinBox()
+        self.code_phase_spin = self._configure_field(QSpinBox())
         self.code_phase_spin.setRange(0, 10_000_000)
         self.code_phase_spin.setValue(350)
 
-        self.amplitude_spin = QDoubleSpinBox()
+        self.amplitude_spin = self._configure_field(QDoubleSpinBox())
         self.amplitude_spin.setRange(-1000.0, 1000.0)
         self.amplitude_spin.setDecimals(6)
         self.amplitude_spin.setSingleStep(0.01)
@@ -339,74 +398,90 @@ class MainWindow(QMainWindow):
         self.auto_amplitude_check.setToolTip("Estimate input RMS and place the synthetic GPS channel at the target C/N0.")
         self.auto_amplitude_check.toggled.connect(self._update_amplitude_controls)
 
-        self.target_cn0_spin = QDoubleSpinBox()
+        self.target_cn0_spin = self._configure_field(QDoubleSpinBox())
         self.target_cn0_spin.setRange(25.0, 55.0)
         self.target_cn0_spin.setDecimals(1)
         self.target_cn0_spin.setSingleStep(1.0)
         self.target_cn0_spin.setValue(42.0)
         self.target_cn0_spin.setToolTip("Target carrier-to-noise density for automatic amplitude.")
 
-        self.carrier_phase_spin = QDoubleSpinBox()
+        self.carrier_phase_spin = self._configure_field(QDoubleSpinBox())
         self.carrier_phase_spin.setRange(-360.0, 360.0)
         self.carrier_phase_spin.setDecimals(2)
         self.carrier_phase_spin.setSingleStep(5.0)
 
-        self.tow_spin = QSpinBox()
+        self.tow_spin = self._configure_field(QSpinBox())
         self.tow_spin.setRange(0, 100_799)
         self.tow_spin.setValue(100)
 
-        self.subframe_spin = QSpinBox()
+        self.subframe_spin = self._configure_field(QSpinBox())
         self.subframe_spin.setRange(1, 5)
         self.subframe_spin.setValue(1)
 
-        self.seed_spin = QSpinBox()
+        self.seed_spin = self._configure_field(QSpinBox())
         self.seed_spin.setRange(0, 2_147_483_647)
         self.seed_spin.setValue(20260505)
 
-        self.chunk_spin = QSpinBox()
+        self.chunk_spin = self._configure_field(QSpinBox())
         self.chunk_spin.setRange(50_000, 20_000_000)
         self.chunk_spin.setSingleStep(250_000)
         self.chunk_spin.setValue(DEFAULT_CHUNK_SAMPLES)
 
-        self.backend_combo = QComboBox()
+        self.backend_combo = self._configure_field(QComboBox())
         self.backend_combo.addItem("Auto", "auto")
         self.backend_combo.addItem("CPU", "cpu")
         self.backend_combo.addItem("GPU", "gpu")
         self.backend_combo.setToolTip("Auto uses CuPy/CUDA when available and falls back to CPU.")
 
-        self.workers_spin = QSpinBox()
+        self.workers_spin = self._configure_field(QSpinBox())
         self.workers_spin.setRange(0, 64)
         self.workers_spin.setSpecialValueText("Auto")
         self.workers_spin.setValue(0)
         self.workers_spin.setToolTip(f"CPU worker count. Auto is currently {DEFAULT_WORKER_COUNT}.")
 
-        self.inflight_spin = QSpinBox()
+        self.inflight_spin = self._configure_field(QSpinBox())
         self.inflight_spin.setRange(0, 128)
         self.inflight_spin.setSpecialValueText("Auto")
         self.inflight_spin.setValue(0)
         self.inflight_spin.setToolTip("Maximum queued processing blocks. Auto is 2x workers.")
 
-        form_left = QFormLayout()
+        form_left = self._configure_form(QFormLayout())
         form_left.addRow("Sample rate", self.sample_rate_spin)
         form_left.addRow("PRN", self.prn_spin)
         form_left.addRow("Doppler Hz", self.doppler_spin)
         form_left.addRow("Code phase samples", self.code_phase_spin)
 
-        form_right = QFormLayout()
-        form_right.addRow("Amplitude", self.amplitude_spin)
-        form_right.addRow("", self.auto_amplitude_check)
-        form_right.addRow("Target C/N0 dB-Hz", self.target_cn0_spin)
-        form_right.addRow("Carrier phase deg", self.carrier_phase_spin)
-        form_right.addRow("Start TOW count", self.tow_spin)
-        form_right.addRow("Start subframe ID", self.subframe_spin)
-        form_right.addRow("Chunk samples", self.chunk_spin)
-        form_right.addRow("Compute backend", self.backend_combo)
-        form_right.addRow("CPU workers", self.workers_spin)
-        form_right.addRow("In-flight blocks", self.inflight_spin)
-        form_right.addRow("Nav seed", self.seed_spin)
+        form_nav = self._configure_form(QFormLayout())
+        form_nav.addRow("Carrier phase deg", self.carrier_phase_spin)
+        form_nav.addRow("Start TOW count", self.tow_spin)
+        form_nav.addRow("Start subframe ID", self.subframe_spin)
+        form_nav.addRow("Nav seed", self.seed_spin)
 
-        grid.addLayout(form_left, 0, 0)
-        grid.addLayout(form_right, 0, 1)
+        form_processing = self._configure_form(QFormLayout())
+        form_processing.addRow("Amplitude", self.amplitude_spin)
+        form_processing.addRow("", self.auto_amplitude_check)
+        form_processing.addRow("Target C/N0 dB-Hz", self.target_cn0_spin)
+        form_processing.addRow("Chunk samples", self.chunk_spin)
+        form_processing.addRow("Compute backend", self.backend_combo)
+        form_processing.addRow("CPU workers", self.workers_spin)
+        form_processing.addRow("In-flight blocks", self.inflight_spin)
+
+        signal_column = QVBoxLayout()
+        signal_column.setSpacing(14)
+        signal_column.addWidget(self._section_label("Signal"))
+        signal_column.addLayout(form_left)
+        signal_column.addWidget(self._section_label("Navigation"))
+        signal_column.addLayout(form_nav)
+        signal_column.addStretch(1)
+
+        processing_column = QVBoxLayout()
+        processing_column.setSpacing(8)
+        processing_column.addWidget(self._section_label("Processing"))
+        processing_column.addLayout(form_processing)
+        processing_column.addStretch(1)
+
+        grid.addLayout(signal_column, 0, 0)
+        grid.addLayout(processing_column, 0, 1)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         self._update_amplitude_controls()
@@ -415,45 +490,48 @@ class MainWindow(QMainWindow):
     def _build_relocation_group(self) -> QGroupBox:
         group = QGroupBox("Position Overlay")
         grid = QGridLayout(group)
+        grid.setContentsMargins(10, 14, 10, 10)
+        grid.setHorizontalSpacing(28)
+        grid.setVerticalSpacing(10)
 
         self.overlay_offset_check = QCheckBox("Use offset from detected PVT")
         self.overlay_offset_check.setChecked(True)
 
-        self.overlay_east_spin = QDoubleSpinBox()
+        self.overlay_east_spin = self._configure_field(QDoubleSpinBox())
         self.overlay_east_spin.setRange(-20_000.0, 20_000.0)
         self.overlay_east_spin.setDecimals(1)
         self.overlay_east_spin.setSingleStep(100.0)
         self.overlay_east_spin.setValue(1000.0)
 
-        self.overlay_north_spin = QDoubleSpinBox()
+        self.overlay_north_spin = self._configure_field(QDoubleSpinBox())
         self.overlay_north_spin.setRange(-20_000.0, 20_000.0)
         self.overlay_north_spin.setDecimals(1)
         self.overlay_north_spin.setSingleStep(100.0)
 
-        self.overlay_up_spin = QDoubleSpinBox()
+        self.overlay_up_spin = self._configure_field(QDoubleSpinBox())
         self.overlay_up_spin.setRange(-2000.0, 2000.0)
         self.overlay_up_spin.setDecimals(1)
         self.overlay_up_spin.setSingleStep(10.0)
 
-        self.overlay_lat_spin = QDoubleSpinBox()
+        self.overlay_lat_spin = self._configure_field(QDoubleSpinBox())
         self.overlay_lat_spin.setRange(-90.0, 90.0)
         self.overlay_lat_spin.setDecimals(7)
         self.overlay_lat_spin.setSingleStep(0.0001)
         self.overlay_lat_spin.setValue(50.6163)
 
-        self.overlay_lon_spin = QDoubleSpinBox()
+        self.overlay_lon_spin = self._configure_field(QDoubleSpinBox())
         self.overlay_lon_spin.setRange(-180.0, 180.0)
         self.overlay_lon_spin.setDecimals(7)
         self.overlay_lon_spin.setSingleStep(0.0001)
         self.overlay_lon_spin.setValue(7.1326)
 
-        self.overlay_alt_spin = QDoubleSpinBox()
+        self.overlay_alt_spin = self._configure_field(QDoubleSpinBox())
         self.overlay_alt_spin.setRange(-1000.0, 20_000.0)
         self.overlay_alt_spin.setDecimals(1)
         self.overlay_alt_spin.setSingleStep(10.0)
         self.overlay_alt_spin.setValue(350.0)
 
-        self.overlay_cn0_spin = QDoubleSpinBox()
+        self.overlay_cn0_spin = self._configure_field(QDoubleSpinBox())
         self.overlay_cn0_spin.setRange(35.0, 65.0)
         self.overlay_cn0_spin.setDecimals(1)
         self.overlay_cn0_spin.setSingleStep(1.0)
@@ -475,14 +553,14 @@ class MainWindow(QMainWindow):
         self.overlay_summary.setWordWrap(True)
         self.overlay_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
-        left = QFormLayout()
+        left = self._configure_form(QFormLayout())
         left.addRow("", self.overlay_offset_check)
         left.addRow("East m", self.overlay_east_spin)
         left.addRow("North m", self.overlay_north_spin)
         left.addRow("Up m", self.overlay_up_spin)
         left.addRow("Overlay C/N0", self.overlay_cn0_spin)
 
-        right = QFormLayout()
+        right = self._configure_form(QFormLayout())
         right.addRow("Target lat", self.overlay_lat_spin)
         right.addRow("Target lon", self.overlay_lon_spin)
         right.addRow("Target alt m", self.overlay_alt_spin)
@@ -492,10 +570,12 @@ class MainWindow(QMainWindow):
         buttons.addWidget(self.overlay_write_button)
         buttons.addStretch(1)
 
-        grid.addLayout(left, 0, 0)
-        grid.addLayout(right, 0, 1)
-        grid.addLayout(buttons, 1, 0, 1, 2)
-        grid.addWidget(self.overlay_summary, 2, 0, 1, 2)
+        grid.addWidget(self._section_label("Offset"), 0, 0)
+        grid.addWidget(self._section_label("Target position"), 0, 1)
+        grid.addLayout(left, 1, 0)
+        grid.addLayout(right, 1, 1)
+        grid.addLayout(buttons, 2, 0, 1, 2)
+        grid.addWidget(self.overlay_summary, 3, 0, 1, 2)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         return group
@@ -503,11 +583,14 @@ class MainWindow(QMainWindow):
     def _build_run_group(self) -> QGroupBox:
         group = QGroupBox("Run")
         layout = QVBoxLayout(group)
+        layout.setContentsMargins(10, 14, 10, 10)
+        layout.setSpacing(10)
 
         controls = QHBoxLayout()
+        controls.setSpacing(10)
         self.metadata_check = QCheckBox("Metadata JSON")
         self.metadata_check.setChecked(True)
-        self.detect_mode_combo = QComboBox()
+        self.detect_mode_combo = self._configure_field(QComboBox())
         self.detect_mode_combo.addItem("Balanced", "balanced")
         self.detect_mode_combo.addItem("Weak", "weak")
         self.detect_mode_combo.addItem("Strong", "strong")
@@ -546,7 +629,8 @@ class MainWindow(QMainWindow):
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(500)
-        self.log.setMinimumHeight(140)
+        self.log.setMinimumHeight(150)
+        self.log.setMaximumHeight(230)
 
         layout.addLayout(controls)
         layout.addWidget(self.plan_summary)
