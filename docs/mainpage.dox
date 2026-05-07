@@ -3,10 +3,11 @@
 \section scope Scope
 
 GPSDataAdder is an offline GPS L1 C/A IQ-file augmentation tool. It reads local
-little-endian complex64 recordings, generates deterministic synthetic GPS
-signals, and can add a multi-satellite position relocation overlay for decoder
-testing. The project deliberately avoids SDR control, transmission, live stream
-handling, or network assistance.
+little-endian complex64 recordings and, in the GUI, writes multi-satellite
+position relocation overlays for decoder testing. The CLI also keeps the
+single-satellite synthetic channel path for focused DSP tests. The project
+deliberately avoids SDR control, transmission, live stream handling, or network
+assistance.
 
 This Doxygen set documents the Python package under \c app, repository support
 files, and the high-level design notes below. Build it with:
@@ -22,9 +23,10 @@ documentation artifacts.
 \section workflow End-To-End Workflow
 
 1. \c app/main.py starts either the PySide6 GUI or the CLI fallback.
-2. \c app/gui/main_window.py collects file paths, signal settings, processing
-   settings, and position-overlay parameters.
-3. \c app/gui/workers.py moves detection, planning, and file writing into
+2. \c app/gui/main_window.py collects file paths, processing settings, and a
+   mutually exclusive target-coordinate or east/north/up offset relocation
+   mode.
+3. \c app/gui/workers.py moves relocation planning and file writing into
    background threads so the GUI stays responsive.
 4. \c app/dsp/synthetic_satellite.py estimates amplitude, generates one
    deterministic GPS L1 C/A channel, and writes blockwise complex64 output.
@@ -33,8 +35,9 @@ documentation artifacts.
 6. \c app/dsp/relocation_overlay.py asks Fraunhofer_FHR for baseline PVT,
    decoded received PRNs, ephemeris templates, code tracking, and satellite
    geometry, then writes stronger received-PRN replicas for a target position.
-7. \c app/tests keeps C/A generation, LNAV parity, synthetic-file writing, and
-   relocation-overlay behavior covered by focused pytest cases.
+7. \c app/tests keeps C/A generation, LNAV parity, synthetic-file writing,
+   relocation-overlay behavior, and GUI mode handling covered by focused pytest
+   cases.
 
 \section dsp DSP Modules
 
@@ -75,15 +78,16 @@ block.
 
 \subsection mainwindow app/gui/main_window.py
 
-Owns the PySide6 interface: input/output paths, synthetic satellite controls,
-position-overlay controls, progress state, logging, worker lifecycle, and result
-summaries.
+Owns the PySide6 interface: input/output paths, processing controls,
+position-overlay controls, target-versus-offset mode state, stale-plan
+invalidation, progress state, logging, worker lifecycle, and result summaries.
+The GUI intentionally exposes only the position overlay write path.
 
 \subsection workers app/gui/workers.py
 
-Defines QThread workers for synthetic writing, detect-first planning,
-relocation planning, and relocation writing. Workers expose progress, messages,
-success, cancellation, and failure signals.
+Defines QThread workers for relocation planning, relocation writing, and the
+lower-level single-satellite synthetic workflows. Workers expose progress,
+messages, success, cancellation, and failure signals.
 
 \section tests Tests
 
@@ -109,8 +113,9 @@ compensation.
 
 \subsection testgui app/tests/test_gui_smoke.py
 
-Checks that the GUI constructs, important controls exist, and worker-facing
-defaults remain usable without running long DSP jobs.
+Checks that the GUI constructs, old synthetic-satellite controls stay absent,
+target-coordinate mode ignores stale offsets, and worker-facing defaults remain
+usable without running long DSP jobs.
 
 \section external Fraunhofer_FHR Interface
 
