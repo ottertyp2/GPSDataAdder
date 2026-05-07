@@ -17,11 +17,13 @@ from app.dsp.relocation_overlay import (
     _generate_relocation_satellite_block,
     _nav_bit_indices,
     _nav_time_shift_samples,
+    _satellite_elevation_deg,
     _synthetic_doppler_hz,
     _synthetic_doppler_rate_hz_s,
     _shift_code_phase_from_geometry,
     _shift_code_phase_samples_from_geometry,
     _synthetic_code_rate_hz,
+    lla_to_ecef,
 )
 from app.dsp.synthetic_satellite import SyntheticSatelliteConfig
 
@@ -170,6 +172,15 @@ def test_doppler_compensation_uses_l1_wavelength() -> None:
 
     assert np.isclose(_synthetic_doppler_hz(source_doppler_hz, GPS_L1_WAVELENGTH_M), source_doppler_hz - 1.0)
     assert np.isclose(_synthetic_doppler_rate_hz_s(GPS_L1_WAVELENGTH_M), -1.0)
+
+
+def test_target_elevation_rejects_opposite_side_satellite() -> None:
+    receiver = lla_to_ecef(0.0, 0.0, 0.0)
+    overhead = receiver * 4.0
+    opposite = -overhead
+
+    assert _satellite_elevation_deg(overhead, 0.0, 0.0, receiver) > 80.0
+    assert _satellite_elevation_deg(opposite, 0.0, 0.0, receiver) < -80.0
 
 
 def test_relocation_generator_uses_fractional_code_phase() -> None:

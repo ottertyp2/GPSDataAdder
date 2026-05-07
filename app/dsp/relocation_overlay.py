@@ -18,7 +18,7 @@ from app.dsp.gps_ca import (
     code_phase_samples_to_chips,
     generate_ca_code,
 )
-from app.dsp.lnav import build_lnav_bit_stream_from_templates
+from app.dsp.lnav import build_broadcast_ephemeris_templates, build_lnav_bit_stream_from_templates
 from app.dsp.synthetic_satellite import (
     COMPLEX64_DTYPE,
     DEFAULT_CHUNK_SAMPLES,
@@ -40,18 +40,23 @@ from app.dsp.tow_detect import _fraunhofer_project_path
 SPEED_OF_LIGHT_M_S = 299_792_458.0
 GPS_L1_FREQUENCY_HZ = 1_575_420_000.0
 GPS_L1_WAVELENGTH_M = SPEED_OF_LIGHT_M_S / GPS_L1_FREQUENCY_HZ
+GPS_WEEK_SECONDS = 604_800.0
+GPS_MU_M3_S2 = 3.986005e14
+GPS_EARTH_ROTATION_RAD_S = 7.2921151467e-5
 WGS84_A_M = 6_378_137.0
 WGS84_F = 1.0 / 298.257223563
 WGS84_E2 = WGS84_F * (2.0 - WGS84_F)
 DEFAULT_RELOCATION_CN0_DBHZ = 56.0
-DEFAULT_RELOCATION_TRACKING_S = 42.0
+DEFAULT_RELOCATION_TRACKING_S = 72.0
 DEFAULT_RELOCATION_MAX_SATELLITES = 8
+DEFAULT_TARGET_OVERLAY_SATELLITES = 8
+MIN_TARGET_ELEVATION_DEG = 5.0
 NAV_BIT_GUARD_BITS = 64
 
 
 @dataclass(frozen=True)
 class RelocationChannelPlan:
-    """One stronger synthetic replica of an already received PRN."""
+    """One synthetic received GPS L1 C/A channel in the relocation overlay."""
 
     prn: int
     doppler_hz: float
@@ -77,6 +82,8 @@ class RelocationChannelPlan:
     code_phase_chips: float | None = None
     reference_code_phase_chips: float | None = None
     source_code_rate_hz: float | None = None
+    synthetic_ephemeris: bool = False
+    target_elevation_deg: float | None = None
 
 
 @dataclass(frozen=True)
@@ -517,7 +524,10 @@ def plan_relocation_overlay(
         target_cn0_dbhz=target_cn0_dbhz,
     )
     channels: list[RelocationChannelPlan] = []
+    skipped_below_horizon: list[int] = []
+    used_prns: set[int] = set()
     for raw_channel in analysis["channels"]:
+        used_prns.add(int(raw_channel["prn"]))
         satellite = np.asarray(raw_channel["satellite_position_m"], dtype=np.float64)
         satellite_velocity = np.asarray(raw_channel.get("satellite_velocity_m_s", (0.0, 0.0, 0.0)), dtype=np.float64)
         if satellite_velocity.shape != (3,) or not np.all(np.isfinite(satellite_velocity)):
@@ -528,6 +538,15 @@ def plan_relocation_overlay(
         )
         if satellite_acceleration.shape != (3,) or not np.all(np.isfinite(satellite_acceleration)):
             satellite_acceleration = np.zeros(3, dtype=np.float64)
+        target_elevation_deg = _satellite_elevation_deg(
+            satellite,
+            float(target_latitude_deg),
+            float(target_longitude_deg),
+            target_ecef,
+        )
+        if target_elevation_deg < MIN_TARGET_ELEVATION_DEG:
+            skipped_below_horizon.append(int(raw_channel["prn"]))
+            continue
         range_delta_m = float(np.linalg.norm(satellite - target_ecef) - np.linalg.norm(satellite - baseline_ecef))
         range_delta_samples = range_delta_m / SPEED_OF_LIGHT_M_S * float(sample_rate_hz)
         range_delta_rate_m_s = _range_delta_rate_m_s(satellite, satellite_velocity, baseline_ecef, target_ecef)
@@ -588,7 +607,29 @@ def plan_relocation_overlay(
                 code_phase_chips=code_phase_shift.code_phase_chips,
                 reference_code_phase_chips=code_phase_shift.reference_code_phase_chips,
                 source_code_rate_hz=source_code_rate_hz,
+                synthetic_ephemeris=False,
+                target_elevation_deg=target_elevation_deg,
             )
+        )
+    synthetic_channels = _build_target_synthetic_channels(
+        analysis_channels=list(analysis["channels"]),
+        used_prns=used_prns,
+        sample_rate_hz=float(sample_rate_hz),
+        target_latitude_deg=float(target_latitude_deg),
+        target_longitude_deg=float(target_longitude_deg),
+        target_altitude_m=float(target_altitude_m),
+        target_ecef_m=target_ecef,
+        amplitude=float(amplitude_estimate.amplitude),
+        existing_channels=channels,
+        desired_channel_count=DEFAULT_TARGET_OVERLAY_SATELLITES,
+    )
+    channels.extend(synthetic_channels)
+    if len(channels) < 4:
+        skipped = ", ".join(str(prn) for prn in skipped_below_horizon) or "none"
+        raise RuntimeError(
+            "Target geometry has fewer than four usable received PRNs after the elevation mask. "
+            f"Skipped below {MIN_TARGET_ELEVATION_DEG:.1f} deg target elevation: {skipped}. "
+            "Use a smaller offset or add target-visible synthetic ephemeris channels."
         )
     shift_ecef = target_ecef - baseline_ecef
     lat = np.deg2rad(float(baseline["latitude_deg"]))
@@ -600,7 +641,7 @@ def plan_relocation_overlay(
         f"Baseline PVT: {baseline['latitude_deg']:.6f}, {baseline['longitude_deg']:.6f}, {baseline['altitude_m']:.1f} m.",
         f"Target PVT: {target_latitude_deg:.6f}, {target_longitude_deg:.6f}, {target_altitude_m:.1f} m.",
         f"Offset: east {float(np.dot(shift_ecef, east)):.1f} m, north {float(np.dot(shift_ecef, north)):.1f} m, up {float(np.dot(shift_ecef, up)):.1f} m.",
-        f"Overlay: {len(channels)} received PRNs, LNAV time shifts, fractional code phase, Doppler/range-rate drift, target {target_cn0_dbhz:.1f} dB-Hz, {backend} backend.",
+        f"Overlay: {len(channels)} target-visible PRNs ({len(synthetic_channels)} synthetic target ephemeris), LNAV time shifts, fractional code phase, Doppler/range-rate drift, target {target_cn0_dbhz:.1f} dB-Hz, {backend} backend.",
     )
     return RelocationOverlayPlan(
         input_path=str(source),
@@ -681,6 +722,340 @@ def _synthetic_doppler_rate_hz_s(range_delta_acceleration_m_s2: float) -> float:
     if not np.isfinite(range_delta_acceleration_m_s2):
         raise ValueError("Range-delta acceleration must be finite.")
     return -float(range_delta_acceleration_m_s2) / GPS_L1_WAVELENGTH_M
+
+
+def _satellite_elevation_deg(
+    satellite_ecef_m: np.ndarray,
+    receiver_latitude_deg: float,
+    receiver_longitude_deg: float,
+    receiver_ecef_m: np.ndarray,
+) -> float:
+    """Return apparent satellite elevation above the receiver local horizon."""
+
+    lat = np.deg2rad(float(receiver_latitude_deg))
+    lon = np.deg2rad(float(receiver_longitude_deg))
+    up = np.asarray([np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)], dtype=np.float64)
+    line = np.asarray(satellite_ecef_m, dtype=np.float64) - np.asarray(receiver_ecef_m, dtype=np.float64)
+    distance = float(np.linalg.norm(line))
+    if distance <= 0.0 or not np.isfinite(distance):
+        return -90.0
+    sin_elevation = float(np.dot(line / distance, up))
+    return float(np.rad2deg(np.arcsin(np.clip(sin_elevation, -1.0, 1.0))))
+
+
+def _gps_time_delta_seconds(delta_s: float) -> float:
+    value = float(delta_s)
+    while value > GPS_WEEK_SECONDS * 0.5:
+        value -= GPS_WEEK_SECONDS
+    while value < -GPS_WEEK_SECONDS * 0.5:
+        value += GPS_WEEK_SECONDS
+    return value
+
+
+def _synthetic_broadcast_position_ecef_m(
+    transmit_time_s: float,
+    *,
+    toe_s: float,
+    sqrt_a_sqrt_m: float,
+    eccentricity: float,
+    i0_rad: float,
+    omega0_rad: float,
+    omega_rad: float,
+    m0_rad: float,
+    delta_n_rad_s: float,
+    omega_dot_rad_s: float,
+    idot_rad_s: float,
+) -> np.ndarray:
+    semi_major_axis_m = float(sqrt_a_sqrt_m) * float(sqrt_a_sqrt_m)
+    mean_motion = np.sqrt(GPS_MU_M3_S2 / (semi_major_axis_m**3)) + float(delta_n_rad_s)
+    tk = _gps_time_delta_seconds(float(transmit_time_s) - float(toe_s))
+    mean_anomaly = float(m0_rad) + mean_motion * tk
+    eccentric_anomaly = mean_anomaly
+    for _ in range(12):
+        eccentric_anomaly = mean_anomaly + float(eccentricity) * np.sin(eccentric_anomaly)
+
+    true_anomaly = np.arctan2(
+        np.sqrt(1.0 - float(eccentricity) * float(eccentricity)) * np.sin(eccentric_anomaly),
+        np.cos(eccentric_anomaly) - float(eccentricity),
+    )
+    argument_of_latitude = true_anomaly + float(omega_rad)
+    radius_m = semi_major_axis_m * (1.0 - float(eccentricity) * np.cos(eccentric_anomaly))
+    inclination = float(i0_rad) + float(idot_rad_s) * tk
+    x_orbital = radius_m * np.cos(argument_of_latitude)
+    y_orbital = radius_m * np.sin(argument_of_latitude)
+    omega = (
+        float(omega0_rad)
+        + (float(omega_dot_rad_s) - GPS_EARTH_ROTATION_RAD_S) * tk
+        - GPS_EARTH_ROTATION_RAD_S * float(toe_s)
+    )
+    return np.asarray(
+        [
+            x_orbital * np.cos(omega) - y_orbital * np.cos(inclination) * np.sin(omega),
+            x_orbital * np.sin(omega) + y_orbital * np.cos(inclination) * np.cos(omega),
+            y_orbital * np.sin(inclination),
+        ],
+        dtype=np.float64,
+    )
+
+
+def _rotated_synthetic_position(
+    elements: dict[str, float],
+    transmit_time_s: float,
+    receiver_ecef_m: np.ndarray,
+) -> np.ndarray:
+    position = _synthetic_broadcast_position_ecef_m(float(transmit_time_s), **elements)
+    transit_s = float(np.linalg.norm(position - np.asarray(receiver_ecef_m, dtype=np.float64))) / SPEED_OF_LIGHT_M_S
+    return _rotate_ecef_for_transit(position, transit_s)
+
+
+def _rotate_ecef_for_transit(ecef_m: np.ndarray, travel_time_s: float) -> np.ndarray:
+    angle = GPS_EARTH_ROTATION_RAD_S * float(travel_time_s)
+    cos_a = np.cos(angle)
+    sin_a = np.sin(angle)
+    x, y, z = np.asarray(ecef_m, dtype=np.float64)
+    return np.asarray([cos_a * x + sin_a * y, -sin_a * x + cos_a * y, z], dtype=np.float64)
+
+
+def _line_of_sight_unit(satellite_ecef_m: np.ndarray, receiver_ecef_m: np.ndarray) -> np.ndarray:
+    line = np.asarray(satellite_ecef_m, dtype=np.float64) - np.asarray(receiver_ecef_m, dtype=np.float64)
+    distance = float(np.linalg.norm(line))
+    if distance <= 0.0 or not np.isfinite(distance):
+        return np.zeros(3, dtype=np.float64)
+    return line / distance
+
+
+def _candidate_geometry_score(
+    satellite_ecef_m: np.ndarray,
+    receiver_ecef_m: np.ndarray,
+    existing_satellites: list[np.ndarray],
+    elevation_deg: float,
+) -> float:
+    if not existing_satellites:
+        return float(elevation_deg)
+    candidate_los = _line_of_sight_unit(satellite_ecef_m, receiver_ecef_m)
+    separations = []
+    for satellite in existing_satellites:
+        other_los = _line_of_sight_unit(satellite, receiver_ecef_m)
+        dot = float(np.clip(np.dot(candidate_los, other_los), -1.0, 1.0))
+        separations.append(float(np.rad2deg(np.arccos(dot))))
+    return float(min(separations) * 3.0 + elevation_deg)
+
+
+def _synthetic_orbit_candidates_for_prn(
+    prn: int,
+    transmit_time_s: float,
+    target_latitude_deg: float,
+    target_longitude_deg: float,
+    target_ecef_m: np.ndarray,
+    existing_satellites: list[np.ndarray],
+) -> list[tuple[float, float, dict[str, float], np.ndarray]]:
+    sqrt_a = float(np.sqrt(26_560_000.0))
+    toe_s = float(round(float(transmit_time_s) / 16.0) * 16.0)
+    inclination = float(np.deg2rad(55.0))
+    eccentricity = 0.006 + 0.0003 * float(int(prn) % 11)
+    omega_dot = -8.3e-9
+    arg_base = ((int(prn) * 137.507764) % 360.0) * np.pi / 180.0
+    rows: list[tuple[float, float, dict[str, float], np.ndarray]] = []
+    for raan_index in range(16):
+        omega0 = -np.pi + 2.0 * np.pi * (raan_index / 16.0) + 0.017 * int(prn)
+        for anomaly_index in range(24):
+            m0 = -np.pi + 2.0 * np.pi * (anomaly_index / 24.0) + 0.031 * int(prn)
+            elements = {
+                "toe_s": toe_s,
+                "sqrt_a_sqrt_m": sqrt_a,
+                "eccentricity": eccentricity,
+                "i0_rad": inclination,
+                "omega0_rad": float(((omega0 + np.pi) % (2.0 * np.pi)) - np.pi),
+                "omega_rad": float(((arg_base + np.pi) % (2.0 * np.pi)) - np.pi),
+                "m0_rad": float(((m0 + np.pi) % (2.0 * np.pi)) - np.pi),
+                "delta_n_rad_s": 0.0,
+                "omega_dot_rad_s": omega_dot,
+                "idot_rad_s": 0.0,
+            }
+            satellite = _rotated_synthetic_position(elements, transmit_time_s, target_ecef_m)
+            elevation = _satellite_elevation_deg(
+                satellite,
+                target_latitude_deg,
+                target_longitude_deg,
+                target_ecef_m,
+            )
+            if elevation < MIN_TARGET_ELEVATION_DEG:
+                continue
+            score = _candidate_geometry_score(satellite, target_ecef_m, existing_satellites, elevation)
+            rows.append((score, elevation, elements, satellite))
+    rows.sort(key=lambda item: item[0], reverse=True)
+    return rows
+
+
+def _reference_context_from_analysis(analysis_channels: list[dict[str, object]]) -> tuple[int, int, float, float]:
+    if not analysis_channels:
+        raise RuntimeError("Cannot synthesize target satellites without source timing evidence.")
+    first = min(analysis_channels, key=lambda item: float(item["reference_file_time_s"]))
+    tow_count = int(first["start_tow_count"])
+    subframe_id = int(first["start_subframe_id"])
+    reference_file_time_s = float(first["reference_file_time_s"])
+    transmit_time_s = float((tow_count * 6 - 6) % int(GPS_WEEK_SECONDS))
+    return tow_count, subframe_id, reference_file_time_s, transmit_time_s
+
+
+def _synthetic_channel_timing(
+    satellite_ecef_m: np.ndarray,
+    target_ecef_m: np.ndarray,
+    sample_rate_hz: float,
+    reference_file_time_s: float,
+    median_range_m: float,
+) -> tuple[int, int, float, float]:
+    range_m = float(np.linalg.norm(np.asarray(satellite_ecef_m, dtype=np.float64) - np.asarray(target_ecef_m, dtype=np.float64)))
+    desired_receive_time_s = float(reference_file_time_s) + (range_m - float(median_range_m)) / SPEED_OF_LIGHT_M_S
+    bit_start_time_s = round(desired_receive_time_s * 1000.0) / 1000.0
+    code_phase_s = bit_start_time_s - desired_receive_time_s
+    reference_sample = int(round(bit_start_time_s * float(sample_rate_hz)))
+    reference_bit_index = int(np.ceil(reference_sample * NAV_BIT_RATE_BPS / float(sample_rate_hz)) + NAV_BIT_GUARD_BITS)
+    reference_code_phase_chips = (code_phase_s * CA_CODE_RATE_HZ) % float(CA_CODE_LENGTH)
+    return reference_sample, reference_bit_index, reference_code_phase_chips, range_m
+
+
+def _build_target_synthetic_channels(
+    *,
+    analysis_channels: list[dict[str, object]],
+    used_prns: set[int],
+    sample_rate_hz: float,
+    target_latitude_deg: float,
+    target_longitude_deg: float,
+    target_altitude_m: float,
+    target_ecef_m: np.ndarray,
+    amplitude: float,
+    existing_channels: list[RelocationChannelPlan],
+    desired_channel_count: int,
+) -> list[RelocationChannelPlan]:
+    if len(existing_channels) >= int(desired_channel_count):
+        return []
+    start_tow_count, start_subframe_id, reference_file_time_s, transmit_time_s = _reference_context_from_analysis(
+        analysis_channels
+    )
+    existing_channel_prns = {int(channel.prn) for channel in existing_channels}
+    existing_satellites: list[np.ndarray] = []
+    for raw_channel in analysis_channels:
+        prn = int(raw_channel["prn"])
+        if prn in existing_channel_prns:
+            existing_satellites.append(np.asarray(raw_channel["satellite_position_m"], dtype=np.float64))
+
+    selected: list[tuple[int, float, dict[str, float], np.ndarray]] = []
+    while len(existing_channels) + len(selected) < int(desired_channel_count):
+        best: tuple[int, float, float, dict[str, float], np.ndarray] | None = None
+        for prn in range(1, 33):
+            if prn in used_prns or any(item[0] == prn for item in selected):
+                continue
+            candidates = _synthetic_orbit_candidates_for_prn(
+                prn,
+                transmit_time_s,
+                target_latitude_deg,
+                target_longitude_deg,
+                target_ecef_m,
+                existing_satellites,
+            )
+            if not candidates:
+                continue
+            score, elevation, elements, satellite = candidates[0]
+            if best is None or score > best[1]:
+                best = (prn, score, elevation, elements, satellite)
+        if best is None:
+            break
+        prn, _score, elevation, elements, satellite = best
+        selected.append((prn, float(elevation), elements, satellite))
+        existing_satellites.append(satellite)
+
+    if not selected:
+        return []
+    ranges = [
+        float(np.linalg.norm(np.asarray(satellite, dtype=np.float64) - np.asarray(target_ecef_m, dtype=np.float64)))
+        for _prn, _elevation, _elements, satellite in selected
+    ]
+    ranges.extend(
+        float(np.linalg.norm(np.asarray(raw["satellite_position_m"], dtype=np.float64) - np.asarray(target_ecef_m, dtype=np.float64)))
+        for raw in analysis_channels
+        if int(raw["prn"]) in existing_channel_prns
+    )
+    median_range_m = float(np.median(np.asarray(ranges, dtype=np.float64)))
+    channels: list[RelocationChannelPlan] = []
+    for prn, elevation, elements, satellite in selected:
+        satellite_minus = _rotated_synthetic_position(elements, transmit_time_s - 1.0, target_ecef_m)
+        satellite_plus = _rotated_synthetic_position(elements, transmit_time_s + 1.0, target_ecef_m)
+        satellite_velocity = (satellite_plus - satellite_minus) * 0.5
+        satellite_acceleration = satellite_plus - 2.0 * satellite + satellite_minus
+        range_rate_m_s = _range_rate_m_s(satellite, satellite_velocity, target_ecef_m)
+        range_acceleration_m_s2 = _range_acceleration_m_s2(
+            satellite,
+            satellite_velocity,
+            satellite_acceleration,
+            target_ecef_m,
+        )
+        reference_sample, reference_bit_index, reference_code_phase_chips, range_m = _synthetic_channel_timing(
+            satellite,
+            target_ecef_m,
+            sample_rate_hz,
+            reference_file_time_s,
+            median_range_m,
+        )
+        code_rate_hz = _synthetic_code_rate_hz(CA_CODE_RATE_HZ, range_rate_m_s)
+        code_rate_rate_hz_s = _synthetic_code_rate_rate_hz_s(CA_CODE_RATE_HZ, range_acceleration_m_s2)
+        doppler_hz = _synthetic_doppler_hz(0.0, range_rate_m_s)
+        doppler_rate_hz_s = _synthetic_doppler_rate_hz_s(range_acceleration_m_s2)
+        phase_shift = _shift_code_phase_from_geometry(
+            reference_code_phase_chips,
+            reference_sample,
+            0.0,
+            CA_CODE_RATE_HZ,
+            code_rate_hz,
+            sample_rate_hz,
+        )
+        templates = build_broadcast_ephemeris_templates(
+            week_number_mod1024=2400 % 1024,
+            tow_count=start_tow_count,
+            toe_s=float(elements["toe_s"]),
+            toc_s=float(elements["toe_s"]),
+            sqrt_a_sqrt_m=float(elements["sqrt_a_sqrt_m"]),
+            eccentricity=float(elements["eccentricity"]),
+            i0_rad=float(elements["i0_rad"]),
+            omega0_rad=float(elements["omega0_rad"]),
+            omega_rad=float(elements["omega_rad"]),
+            m0_rad=float(elements["m0_rad"]),
+            delta_n_rad_s=float(elements["delta_n_rad_s"]),
+            omega_dot_rad_s=float(elements["omega_dot_rad_s"]),
+            idot_rad_s=float(elements["idot_rad_s"]),
+            iode=(int(prn) * 7) & 0xFF,
+        )
+        channels.append(
+            RelocationChannelPlan(
+                prn=int(prn),
+                doppler_hz=doppler_hz,
+                code_rate_hz=code_rate_hz,
+                original_code_phase_samples=phase_shift.original_code_phase_samples,
+                code_phase_samples=phase_shift.code_phase_samples,
+                range_delta_m=range_m,
+                range_delta_samples=range_m / SPEED_OF_LIGHT_M_S * float(sample_rate_hz),
+                amplitude=float(amplitude),
+                start_tow_count=int(start_tow_count),
+                start_subframe_id=int(start_subframe_id),
+                reference_bit_index=reference_bit_index,
+                reference_sample=reference_sample,
+                nav_subframes=templates,
+                range_delta_rate_m_s=range_rate_m_s,
+                range_delta_acceleration_m_s2=range_acceleration_m_s2,
+                nav_time_shift_samples=0,
+                source_reference_sample=reference_sample,
+                source_doppler_hz=None,
+                doppler_rate_hz_s=doppler_rate_hz_s,
+                code_rate_rate_hz_s=code_rate_rate_hz_s,
+                original_code_phase_chips=phase_shift.original_code_phase_chips,
+                code_phase_chips=phase_shift.code_phase_chips,
+                reference_code_phase_chips=reference_code_phase_chips,
+                source_code_rate_hz=CA_CODE_RATE_HZ,
+                synthetic_ephemeris=True,
+                target_elevation_deg=elevation,
+            )
+        )
+    return channels
 
 
 def _range_rate_m_s(satellite_ecef_m: np.ndarray, satellite_velocity_m_s: np.ndarray, receiver_ecef_m: np.ndarray) -> float:

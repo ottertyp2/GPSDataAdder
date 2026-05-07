@@ -10,6 +10,7 @@ from app.dsp.lnav import (
     PREAMBLE,
     build_lnav_bit_stream,
     build_lnav_bit_stream_from_templates,
+    build_broadcast_ephemeris_templates,
     build_synthetic_subframe,
     check_lnav_word,
     extract_lnav_data_bits,
@@ -119,6 +120,41 @@ def test_lnav_templates_can_align_reference_subframe_inside_stream() -> None:
     assert estimate.bit_index == 123
     assert estimate.tow_count == 4321
     assert estimate.subframe_id == 3
+
+
+def test_broadcast_ephemeris_templates_are_parity_valid_and_visible() -> None:
+    templates = build_broadcast_ephemeris_templates(
+        week_number_mod1024=2400 % 1024,
+        tow_count=5000,
+        toe_s=30_000.0,
+        toc_s=30_000.0,
+        sqrt_a_sqrt_m=np.sqrt(26_560_000.0),
+        eccentricity=0.01,
+        i0_rad=np.deg2rad(55.0),
+        omega0_rad=0.3,
+        omega_rad=1.0,
+        m0_rad=2.0,
+    )
+
+    previous_word: list[int] | None = None
+    for template in templates:
+        for raw_word in template["words"]:
+            word = [int(bit) for bit in str(raw_word)]
+            assert check_lnav_word(word, previous_word)
+            previous_word = word
+
+    bits = build_lnav_bit_stream_from_templates(
+        LNAV_SUBFRAME_BITS * 3,
+        templates,
+        start_tow_count=5000,
+        start_subframe_id=1,
+        reference_bit_index=64,
+    )
+    estimate = find_lnav_tow(bits)
+
+    assert estimate is not None
+    assert estimate.bit_index == 64
+    assert estimate.tow_count == 5000
 
 
 def test_lnav_generation_is_deterministic() -> None:

@@ -34,7 +34,9 @@ documentation artifacts.
    for fast TOW evidence from real captures.
 6. \c app/dsp/relocation_overlay.py asks Fraunhofer_FHR for baseline PVT,
    decoded received PRNs, ephemeris templates, code tracking, and satellite
-   geometry, then writes stronger received-PRN replicas for a target position.
+   geometry, then writes a target-visible overlay. It keeps suitable received
+   PRNs and adds synthetic target-visible PRNs with parity-valid broadcast
+   ephemeris templates when the target geometry needs them.
 7. \c app/tests keeps C/A generation, LNAV parity, synthetic-file writing,
    relocation-overlay behavior, and GUI mode handling covered by focused pytest
    cases.
@@ -70,9 +72,10 @@ Builds and writes the position relocation overlay. It converts WGS-84
 coordinates, calls Fraunhofer_FHR for baseline PVT and navigation evidence,
 computes target pseudorange deltas, shifts LNAV arrival timing by whole
 milliseconds for global relocations, preserves fractional C/A phase for the
-remaining sub-millisecond delay, compensates carrier Doppler and Doppler drift,
-compensates code-rate drift, and mixes multiple received-PRN replicas block by
-block.
+remaining sub-millisecond delay, applies a target elevation mask, synthesizes
+additional target-visible broadcast-orbit PRNs when needed, compensates carrier
+Doppler and Doppler drift, compensates code-rate drift, and mixes multiple
+target-visible PRNs block by block.
 
 \section gui GUI Modules
 
@@ -133,6 +136,10 @@ The relocation overlay uses Fraunhofer_FHR for:
 - ephemeris extraction,
 - baseline PVT solution,
 - apparent satellite position, velocity, and acceleration evidence.
+
+When the requested target is not well served by the received PRNs, the overlay
+adds deterministic GPS-like PRNs whose LNAV subframes carry parity-valid
+broadcast ephemeris fields generated for target-visible orbits.
 
 \section build Build And Verification
 

@@ -46,6 +46,40 @@ def int_to_bits(value: int, width: int) -> list[int]:
     return [(value >> shift) & 1 for shift in range(width - 1, -1, -1)]
 
 
+def _signed_int_to_bits(value: int, width: int) -> list[int]:
+    minimum = -(1 << (width - 1))
+    maximum = (1 << (width - 1)) - 1
+    if value < minimum or value > maximum:
+        raise ValueError(f"Signed value {value} does not fit in {width} bits.")
+    if value < 0:
+        value = (1 << width) + value
+    return int_to_bits(value, width)
+
+
+def _scaled_unsigned(value: float, scale: float, width: int) -> list[int]:
+    encoded = int(round(float(value) / float(scale)))
+    return int_to_bits(max(0, min((1 << width) - 1, encoded)), width)
+
+
+def _scaled_signed(value: float, scale: float, width: int) -> list[int]:
+    encoded = int(round(float(value) / float(scale)))
+    minimum = -(1 << (width - 1))
+    maximum = (1 << (width - 1)) - 1
+    return _signed_int_to_bits(max(minimum, min(maximum, encoded)), width)
+
+
+def _split_bits(bits: Sequence[int], *widths: int) -> list[list[int]]:
+    values = [int(bit) for bit in bits]
+    parts: list[list[int]] = []
+    offset = 0
+    for width in widths:
+        parts.append(values[offset : offset + int(width)])
+        offset += int(width)
+    if offset != len(values):
+        raise ValueError("Split widths must consume the full bit sequence.")
+    return parts
+
+
 def compute_lnav_parity(data_bits: Sequence[int], d29_star: int, d30_star: int) -> list[int]:
     """Compute GPS LNAV parity bits D25..D30 for a 24-bit data payload."""
 
@@ -185,6 +219,24 @@ def _make_payload_word(
     raise RuntimeError("Could not create a synthetic payload word with D30=0.")
 
 
+def _make_reserved_tail_word_with_d30_zero(
+    data_bits: Sequence[int],
+    previous_word: Sequence[int] | None,
+) -> list[int]:
+    """Build a word and use the final spare data bits to keep the next preamble visible."""
+
+    data = [int(bit) for bit in data_bits]
+    if len(data) != LNAV_DATA_BITS:
+        raise ValueError("LNAV words need exactly 24 data bits.")
+    for bit23 in (data[22], 0, 1):
+        for bit24 in (data[23], 0, 1):
+            candidate = data[:22] + [int(bit23), int(bit24)]
+            word = make_lnav_word(candidate, previous_word)
+            if word[29] == 0:
+                return word
+    raise RuntimeError("Could not create an LNAV word with D30=0 from spare tail bits.")
+
+
 def build_synthetic_subframe(
     subframe_id: int,
     tow_count: int,
@@ -216,7 +268,11 @@ def build_synthetic_subframe(
             page_id = ((tow + subframe_id) % 32) + 1
             payload = [0, 1] + int_to_bits(page_id, 6) + payload[8:]
         force_d30_zero = word_number == LNAV_SUBFRAME_WORDS
-        word = _make_payload_word(payload, previous, force_d30_zero, rng)
+        word = (
+            _make_reserved_tail_word_with_d30_zero(payload, previous)
+            if force_d30_zero
+            else _make_payload_word(payload, previous, force_d30_zero, rng)
+        )
         words.append(word)
         previous = word
 
@@ -314,8 +370,12 @@ def build_lnav_bit_stream_from_templates(
         how_word = make_lnav_word(how_data, tlm_word)
         words = [tlm_word, how_word]
         previous = how_word
-        for data_bits in payload_words[2:]:
-            word = make_lnav_word(data_bits, previous)
+        for word_index, data_bits in enumerate(payload_words[2:], start=3):
+            word = (
+                _make_reserved_tail_word_with_d30_zero(data_bits, previous)
+                if word_index == LNAV_SUBFRAME_WORDS
+                else make_lnav_word(data_bits, previous)
+            )
             words.append(word)
             previous = word
         stream.extend(bit for word in words for bit in word)
@@ -330,9 +390,131 @@ def build_lnav_bit_stream_from_templates(
         prefix = prefix[-reference_bit_index:]
 
     stream = list(prefix)
-    previous_word: list[int] | None = None
+    previous_word = previous_word if reference_bit_index else None
     subframe_index = 0
     while len(stream) < num_bits:
         previous_word = append_subframe(stream, subframe_index, previous_word)
         subframe_index += 1
     return np.asarray(stream[:num_bits], dtype=np.int8)
+
+
+def build_broadcast_ephemeris_templates(
+    *,
+    week_number_mod1024: int,
+    tow_count: int,
+    toe_s: float,
+    toc_s: float,
+    sqrt_a_sqrt_m: float,
+    eccentricity: float,
+    i0_rad: float,
+    omega0_rad: float,
+    omega_rad: float,
+    m0_rad: float,
+    delta_n_rad_s: float = 0.0,
+    omega_dot_rad_s: float = -8.3e-9,
+    idot_rad_s: float = 0.0,
+    af0_s: float = 0.0,
+    af1_s_s: float = 0.0,
+    af2_s_s2: float = 0.0,
+    tgd_s: float = 0.0,
+    crs_m: float = 0.0,
+    cuc_rad: float = 0.0,
+    cus_rad: float = 0.0,
+    cic_rad: float = 0.0,
+    cis_rad: float = 0.0,
+    crc_m: float = 0.0,
+    ura_index: int = 0,
+    health: int = 0,
+    iode: int = 1,
+    iodc: int | None = None,
+    fit_interval_flag: int = 0,
+) -> tuple[dict[str, object], ...]:
+    """Build parity-valid LNAV subframes 1..3 carrying broadcast ephemeris fields."""
+
+    iode = int(iode) & 0xFF
+    iodc = iode if iodc is None else int(iodc) & 0x3FF
+    tow = int(tow_count) % MAX_TOW_COUNT
+    toe_bits = _scaled_unsigned(toe_s, 2**4, 16)
+    toc_bits = _scaled_unsigned(toc_s, 2**4, 16)
+    sqrt_a_bits = _scaled_unsigned(sqrt_a_sqrt_m, 2**-19, 32)
+    m0_bits = _scaled_signed(m0_rad, 2**-31 * np.pi, 32)
+    omega0_bits = _scaled_signed(omega0_rad, 2**-31 * np.pi, 32)
+    i0_bits = _scaled_signed(i0_rad, 2**-31 * np.pi, 32)
+    omega_bits = _scaled_signed(omega_rad, 2**-31 * np.pi, 32)
+    ecc_bits = _scaled_unsigned(eccentricity, 2**-33, 32)
+    m0_hi, m0_lo = _split_bits(m0_bits, 8, 24)
+    sqrt_a_hi, sqrt_a_lo = _split_bits(sqrt_a_bits, 8, 24)
+    omega0_hi, omega0_lo = _split_bits(omega0_bits, 8, 24)
+    i0_hi, i0_lo = _split_bits(i0_bits, 8, 24)
+    omega_hi, omega_lo = _split_bits(omega_bits, 8, 24)
+    ecc_hi, ecc_lo = _split_bits(ecc_bits, 8, 24)
+
+    subframe_payloads = {
+        1: [
+            [int(bit) for bit in PREAMBLE] + int_to_bits(0x22C0, 16),
+            [],
+            int_to_bits(int(week_number_mod1024) & 0x3FF, 10)
+            + [0, 0]
+            + int_to_bits(int(ura_index) & 0xF, 4)
+            + int_to_bits(int(health) & 0x3F, 6)
+            + int_to_bits((iodc >> 8) & 0x3, 2),
+            [0] * 24,
+            [0] * 24,
+            [0] * 24,
+            [0] * 16 + _scaled_signed(tgd_s, 2**-31, 8),
+            int_to_bits(iodc & 0xFF, 8) + toc_bits,
+            _scaled_signed(af2_s_s2, 2**-55, 8) + _scaled_signed(af1_s_s, 2**-43, 16),
+            _scaled_signed(af0_s, 2**-31, 22) + [0, 0],
+        ],
+        2: [
+            [int(bit) for bit in PREAMBLE] + int_to_bits(0x22C0, 16),
+            [],
+            int_to_bits(iode, 8) + _scaled_signed(crs_m, 2**-5, 16),
+            _scaled_signed(delta_n_rad_s, 2**-43 * np.pi, 16) + m0_hi,
+            m0_lo,
+            _scaled_signed(cuc_rad, 2**-29, 16) + ecc_hi,
+            ecc_lo,
+            _scaled_signed(cus_rad, 2**-29, 16) + sqrt_a_hi,
+            sqrt_a_lo,
+            toe_bits + [int(fit_interval_flag) & 1] + [0] * 7,
+        ],
+        3: [
+            [int(bit) for bit in PREAMBLE] + int_to_bits(0x22C0, 16),
+            [],
+            _scaled_signed(cic_rad, 2**-29, 16) + omega0_hi,
+            omega0_lo,
+            _scaled_signed(cis_rad, 2**-29, 16) + i0_hi,
+            i0_lo,
+            _scaled_signed(crc_m, 2**-5, 16) + omega_hi,
+            omega_lo,
+            _scaled_signed(omega_dot_rad_s, 2**-43 * np.pi, 24),
+            int_to_bits(iode, 8) + _scaled_signed(idot_rad_s, 2**-43 * np.pi, 14) + [0, 0],
+        ],
+    }
+
+    templates: list[dict[str, object]] = []
+    previous_word: list[int] | None = None
+    for subframe_index, subframe_id in enumerate((1, 2, 3)):
+        payloads = subframe_payloads[subframe_id]
+        how_data = int_to_bits((tow + subframe_index) % MAX_TOW_COUNT, 17) + [0, 0] + int_to_bits(subframe_id, 3) + [0, 0]
+        payloads[1] = how_data
+        words: list[list[int]] = []
+        previous = previous_word
+        for word_index, data_bits in enumerate(payloads, start=1):
+            word = (
+                _make_reserved_tail_word_with_d30_zero(data_bits, previous)
+                if word_index == LNAV_SUBFRAME_WORDS
+                else make_lnav_word(data_bits, previous)
+            )
+            words.append(word)
+            previous = word
+        previous_word = words[-1]
+        templates.append(
+            {
+                "subframe_id": subframe_id,
+                "tow_count": (tow + subframe_index) % MAX_TOW_COUNT,
+                "tow_seconds": ((tow + subframe_index) % MAX_TOW_COUNT) * 6,
+                "words": ["".join(str(bit) for bit in word) for word in words],
+            }
+        )
+    return tuple(templates)

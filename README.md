@@ -6,9 +6,10 @@ The tool is meant for testing the `Fraunhofer_FHR` GPS decoder against controlle
 
 ## What It Can Generate
 
-- multi-satellite position overlays using received PRNs and Fraunhofer-derived geometry
+- multi-satellite position overlays using target-visible received PRNs plus synthetic target-visible PRNs when needed
 - target-coordinate relocation or east/north/up offset relocation from the detected baseline PVT
 - continuous LNAV timing aligned to the measurement file time
+- parity-valid synthetic broadcast ephemeris subframes for added target PRNs
 - Doppler, Doppler-drift, code-rate, and code-rate-drift compensation for the target geometry
 - GPS L1 C/A PRN code for PRN `1..32`
 - deterministic 50 bps LNAV-like navigation bits
@@ -16,7 +17,7 @@ The tool is meant for testing the `Fraunhofer_FHR` GPS decoder against controlle
 - plausible TLM preamble and HOW subframe IDs cycling through `1..5`
 - JSON metadata describing the overlay or synthetic signature that was added
 
-The payload is synthetic and deterministic. It is useful for acquisition, tracking, bit sync, preamble detection, and parity checks, but it is not real broadcast ephemeris.
+The simple CLI payload is synthetic and deterministic. The position overlay can also synthesize deterministic, parity-valid GPS-like broadcast ephemeris subframes for extra target-visible PRNs when the requested target is not well served by the originally received satellites.
 
 ## Installation
 
@@ -44,9 +45,9 @@ The GUI is the default entry point. It is built for large local recordings:
 
 ## Position Overlay
 
-The `Position Overlay` panel adds stronger synthetic replicas of already received satellites to a new local output file. It never removes or edits samples in the source recording. The planner uses `Fraunhofer_FHR` to decode a baseline PVT solution, the received PRNs, and their LNAV ephemeris words. It then computes code-phase shifts for a selected target coordinate or a small east/north/up offset, regenerates continuous TLM/HOW timing aligned to the measurement file time, reuses the decoded ephemeris payload words, and writes a multi-PRN overlay. When the backend resolves to GPU, the overlay writer mixes the synthetic PRN replicas on CUDA/CuPy block by block.
+The `Position Overlay` panel adds stronger synthetic received signals to a new local output file. It never removes or edits samples in the source recording. The planner uses `Fraunhofer_FHR` to decode a baseline PVT solution, received PRNs, LNAV ephemeris words, and source timing. It keeps received PRNs only when they are visible from the requested target, and fills the geometry with additional target-visible PRNs carrying deterministic GPS-like broadcast ephemeris subframes when needed. It then computes code-phase/timing for the target coordinate or east/north/up offset, regenerates continuous TLM/HOW timing aligned to the measurement file time, and writes a multi-PRN overlay. When the backend resolves to GPU, the overlay writer mixes the synthetic PRN replicas on CUDA/CuPy block by block.
 
-The overlay keeps fractional C/A code phase internally and now splits large pseudorange changes into whole-millisecond LNAV arrival shifts plus the remaining sub-millisecond PRN phase. That makes targets far outside the local code-phase ambiguity practical instead of wrapping the movement into one C/A period. Each replica also adjusts carrier Doppler, Doppler drift, code rate, and code-rate drift from the target-vs-baseline geometry reported through Fraunhofer-derived satellite position, velocity, and acceleration. The integer code-phase samples shown in logs and metadata are kept as decoder-friendly summaries, but the block synthesizer uses the higher precision chip phase and timing model.
+The overlay keeps fractional C/A code phase internally and splits large pseudorange changes into whole-millisecond LNAV arrival shifts plus the remaining sub-millisecond PRN phase. That makes targets far outside the local code-phase ambiguity practical instead of wrapping the movement into one C/A period. Each replica also adjusts carrier Doppler, Doppler drift, code rate, and code-rate drift from target geometry. Received replicas use Fraunhofer-derived satellite position, velocity, and acceleration; added target PRNs use deterministic broadcast-orbit parameters encoded into their LNAV subframes. The integer code-phase samples shown in logs and metadata are kept as decoder-friendly summaries, but the block synthesizer uses the higher precision chip phase and timing model.
 
 Use `Use east/north/up offset from detected PVT` when you want a relative move from the baseline solution. Disable it when you want the latitude, longitude, and altitude fields to be used directly as the target. In coordinate mode the offset fields are disabled and ignored by the planner, so stale offset values cannot silently affect the requested target. Changing target, offset, or processing settings after planning disables writing until you create a fresh plan. `Write Position Overlay` uses the visible output path and writes metadata to `<output>.relocation.json` when metadata is enabled.
 
@@ -105,7 +106,7 @@ python -m app.main input.bin output.bin --no-metadata
 3. Use `Plan Position Overlay` to inspect the decoded baseline and requested target, then `Write Position Overlay`.
 4. Open the generated output in `Fraunhofer_FHR`.
 5. Use the same sample-rate assumption.
-6. Run acquisition for the received PRNs or scan `1..32`.
+6. Run acquisition for the planned target-visible PRNs or scan `1..32`.
 7. Track the overlay PRNs and decode navigation bits.
 
 ## Running Tests
