@@ -8,12 +8,17 @@ import numpy as np
 
 from app.dsp.lnav import build_synthetic_subframe
 from app.dsp.relocation_overlay import (
+    GPS_L1_WAVELENGTH_M,
     RelocationChannelPlan,
     RelocationOverlayPlan,
     SPEED_OF_LIGHT_M_S,
     add_relocation_overlay_to_file,
     code_phase_for_range_delta,
     _generate_relocation_satellite_block,
+    _nav_bit_indices,
+    _nav_time_shift_samples,
+    _synthetic_doppler_hz,
+    _synthetic_doppler_rate_hz_s,
     _shift_code_phase_from_geometry,
     _shift_code_phase_samples_from_geometry,
     _synthetic_code_rate_hz,
@@ -142,6 +147,31 @@ def test_range_rate_compensation_adjusts_code_rate_sign() -> None:
     assert _synthetic_code_rate_hz(source_code_rate_hz, -100.0) > source_code_rate_hz
 
 
+def test_global_range_delta_is_split_into_lnav_time_shift() -> None:
+    sample_rate_hz = 1_000_000.0
+
+    assert _nav_time_shift_samples(41_900.0, sample_rate_hz) == 42_000
+    assert _nav_time_shift_samples(-41_900.0, sample_rate_hz) == -42_000
+
+    indices = _nav_bit_indices(
+        start_sample=0,
+        sample_count=41,
+        sample_rate_hz=1_000.0,
+        reference_sample=20,
+        reference_bit_index=1,
+    )
+
+    assert int(indices[0]) == 0
+    assert int(indices[20]) == 1
+
+
+def test_doppler_compensation_uses_l1_wavelength() -> None:
+    source_doppler_hz = 1200.0
+
+    assert np.isclose(_synthetic_doppler_hz(source_doppler_hz, GPS_L1_WAVELENGTH_M), source_doppler_hz - 1.0)
+    assert np.isclose(_synthetic_doppler_rate_hz_s(GPS_L1_WAVELENGTH_M), -1.0)
+
+
 def test_relocation_generator_uses_fractional_code_phase() -> None:
     config = SyntheticSatelliteConfig(
         sample_rate_hz=6_138_000.0,
@@ -173,3 +203,36 @@ def test_relocation_generator_uses_fractional_code_phase() -> None:
     )
 
     assert not np.array_equal(rounded, fractional)
+
+
+def test_relocation_generator_applies_doppler_rate() -> None:
+    config = SyntheticSatelliteConfig(
+        sample_rate_hz=1_023_000.0,
+        prn=3,
+        doppler_hz=500.0,
+        code_phase_samples=0,
+        amplitude=1.0,
+    )
+    nav_bits = np.zeros(10, dtype=np.int8)
+
+    constant = _generate_relocation_satellite_block(
+        config,
+        start_sample=0,
+        sample_count=2046,
+        nav_bits=nav_bits,
+        reference_sample=0,
+        reference_bit_index=0,
+        code_rate_hz=1_023_000.0,
+    )
+    drifting = _generate_relocation_satellite_block(
+        config,
+        start_sample=0,
+        sample_count=2046,
+        nav_bits=nav_bits,
+        reference_sample=0,
+        reference_bit_index=0,
+        code_rate_hz=1_023_000.0,
+        doppler_rate_hz_s=200.0,
+    )
+
+    assert not np.allclose(constant, drifting)

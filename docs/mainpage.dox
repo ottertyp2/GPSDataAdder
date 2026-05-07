@@ -65,9 +65,11 @@ then falls back to a lightweight local acquisition/tracking/HOW scan.
 
 Builds and writes the position relocation overlay. It converts WGS-84
 coordinates, calls Fraunhofer_FHR for baseline PVT and navigation evidence,
-computes target pseudorange deltas, preserves fractional C/A phase, compensates
-range-delta rate in the synthetic code rate, and mixes multiple received-PRN
-replicas block by block.
+computes target pseudorange deltas, shifts LNAV arrival timing by whole
+milliseconds for global relocations, preserves fractional C/A phase for the
+remaining sub-millisecond delay, compensates carrier Doppler and Doppler drift,
+compensates code-rate drift, and mixes multiple received-PRN replicas block by
+block.
 
 \section gui GUI Modules
 
@@ -125,7 +127,7 @@ The relocation overlay uses Fraunhofer_FHR for:
 - LNAV bit and subframe decoding,
 - ephemeris extraction,
 - baseline PVT solution,
-- apparent satellite position and velocity evidence.
+- apparent satellite position, velocity, and acceleration evidence.
 
 \section build Build And Verification
 

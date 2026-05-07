@@ -17,7 +17,6 @@ from app.dsp.gps_ca import (
     CA_CODE_RATE_HZ,
     code_phase_samples_to_chips,
     generate_ca_code,
-    sample_ca_code,
 )
 from app.dsp.lnav import build_lnav_bit_stream_from_templates
 from app.dsp.synthetic_satellite import (
@@ -39,12 +38,15 @@ from app.dsp.tow_detect import _fraunhofer_project_path
 
 
 SPEED_OF_LIGHT_M_S = 299_792_458.0
+GPS_L1_FREQUENCY_HZ = 1_575_420_000.0
+GPS_L1_WAVELENGTH_M = SPEED_OF_LIGHT_M_S / GPS_L1_FREQUENCY_HZ
 WGS84_A_M = 6_378_137.0
 WGS84_F = 1.0 / 298.257223563
 WGS84_E2 = WGS84_F * (2.0 - WGS84_F)
 DEFAULT_RELOCATION_CN0_DBHZ = 56.0
 DEFAULT_RELOCATION_TRACKING_S = 42.0
 DEFAULT_RELOCATION_MAX_SATELLITES = 8
+NAV_BIT_GUARD_BITS = 64
 
 
 @dataclass(frozen=True)
@@ -65,8 +67,15 @@ class RelocationChannelPlan:
     reference_sample: int
     nav_subframes: tuple[dict[str, object], ...]
     range_delta_rate_m_s: float = 0.0
+    range_delta_acceleration_m_s2: float = 0.0
+    nav_time_shift_samples: int = 0
+    source_reference_sample: int | None = None
+    source_doppler_hz: float | None = None
+    doppler_rate_hz_s: float = 0.0
+    code_rate_rate_hz_s: float = 0.0
     original_code_phase_chips: float | None = None
     code_phase_chips: float | None = None
+    reference_code_phase_chips: float | None = None
     source_code_rate_hz: float | None = None
 
 
@@ -78,6 +87,7 @@ class RelocationCodePhaseShift:
     code_phase_samples: int
     original_code_phase_chips: float
     code_phase_chips: float
+    reference_code_phase_chips: float
 
 
 @dataclass(frozen=True)
@@ -366,10 +376,15 @@ for prn in sorted(nav_by_prn):
         return rotate_ecef_for_transit(position, transit_s)
 
     velocity_step_s = 1.0
+    satellite_center = apparent_satellite_position(velocity_time_s)
+    satellite_minus = apparent_satellite_position(velocity_time_s - velocity_step_s)
+    satellite_plus = apparent_satellite_position(velocity_time_s + velocity_step_s)
     satellite_velocity = (
-        apparent_satellite_position(velocity_time_s + velocity_step_s * 0.5)
-        - apparent_satellite_position(velocity_time_s - velocity_step_s * 0.5)
-    ) / velocity_step_s
+        satellite_plus - satellite_minus
+    ) / (2.0 * velocity_step_s)
+    satellite_acceleration = (
+        satellite_plus - 2.0 * satellite_center + satellite_minus
+    ) / (velocity_step_s * velocity_step_s)
     first_template = sorted(templates, key=lambda item: float(item["file_time_s"]))[0]
     reference_sample = int(round(float(first_template["file_time_s"]) * float(sample_rate)))
     tracking = tracking_by_prn.get(prn)
@@ -390,6 +405,7 @@ for prn in sorted(nav_by_prn):
             "code_rate_hz": float(code_rate_hz),
             "satellite_position_m": satellite_position_m,
             "satellite_velocity_m_s": [float(value) for value in satellite_velocity],
+            "satellite_acceleration_m_s2": [float(value) for value in satellite_acceleration],
             "start_tow_count": int(first_template["tow_count"]),
             "start_subframe_id": int(first_template["subframe_id"]),
             "reference_file_time_s": float(first_template["file_time_s"]),
@@ -506,16 +522,41 @@ def plan_relocation_overlay(
         satellite_velocity = np.asarray(raw_channel.get("satellite_velocity_m_s", (0.0, 0.0, 0.0)), dtype=np.float64)
         if satellite_velocity.shape != (3,) or not np.all(np.isfinite(satellite_velocity)):
             satellite_velocity = np.zeros(3, dtype=np.float64)
+        satellite_acceleration = np.asarray(
+            raw_channel.get("satellite_acceleration_m_s2", (0.0, 0.0, 0.0)),
+            dtype=np.float64,
+        )
+        if satellite_acceleration.shape != (3,) or not np.all(np.isfinite(satellite_acceleration)):
+            satellite_acceleration = np.zeros(3, dtype=np.float64)
         range_delta_m = float(np.linalg.norm(satellite - target_ecef) - np.linalg.norm(satellite - baseline_ecef))
         range_delta_samples = range_delta_m / SPEED_OF_LIGHT_M_S * float(sample_rate_hz)
         range_delta_rate_m_s = _range_delta_rate_m_s(satellite, satellite_velocity, baseline_ecef, target_ecef)
-        reference_sample = int(round(float(raw_channel["reference_file_time_s"]) * float(sample_rate_hz)))
-        reference_bit_index = int(np.ceil(reference_sample * NAV_BIT_RATE_BPS / float(sample_rate_hz)))
+        range_delta_acceleration_m_s2 = _range_delta_acceleration_m_s2(
+            satellite,
+            satellite_velocity,
+            satellite_acceleration,
+            baseline_ecef,
+            target_ecef,
+        )
+        source_reference_sample = int(round(float(raw_channel["reference_file_time_s"]) * float(sample_rate_hz)))
+        nav_time_shift_samples = _nav_time_shift_samples(range_delta_samples, sample_rate_hz)
+        reference_sample = int(source_reference_sample + nav_time_shift_samples)
+        reference_bit_index = int(
+            np.ceil(source_reference_sample * NAV_BIT_RATE_BPS / float(sample_rate_hz))
+            + NAV_BIT_GUARD_BITS
+        )
         source_code_rate_hz = float(raw_channel.get("code_rate_hz", CA_CODE_RATE_HZ))
         code_rate_hz = _synthetic_code_rate_hz(source_code_rate_hz, range_delta_rate_m_s)
+        code_rate_rate_hz_s = _synthetic_code_rate_rate_hz_s(
+            source_code_rate_hz,
+            range_delta_acceleration_m_s2,
+        )
+        source_doppler_hz = float(raw_channel["doppler_hz"])
+        doppler_hz = _synthetic_doppler_hz(source_doppler_hz, range_delta_rate_m_s)
+        doppler_rate_hz_s = _synthetic_doppler_rate_hz_s(range_delta_acceleration_m_s2)
         code_phase_shift = _shift_code_phase_from_geometry(
             float(raw_channel["reference_code_phase_chips"]),
-            reference_sample,
+            source_reference_sample,
             range_delta_m,
             source_code_rate_hz,
             code_rate_hz,
@@ -524,7 +565,7 @@ def plan_relocation_overlay(
         channels.append(
             RelocationChannelPlan(
                 prn=int(raw_channel["prn"]),
-                doppler_hz=float(raw_channel["doppler_hz"]),
+                doppler_hz=doppler_hz,
                 code_rate_hz=code_rate_hz,
                 original_code_phase_samples=code_phase_shift.original_code_phase_samples,
                 code_phase_samples=code_phase_shift.code_phase_samples,
@@ -537,8 +578,15 @@ def plan_relocation_overlay(
                 reference_sample=reference_sample,
                 nav_subframes=tuple(dict(item) for item in raw_channel["nav_subframes"]),
                 range_delta_rate_m_s=range_delta_rate_m_s,
+                range_delta_acceleration_m_s2=range_delta_acceleration_m_s2,
+                nav_time_shift_samples=nav_time_shift_samples,
+                source_reference_sample=source_reference_sample,
+                source_doppler_hz=source_doppler_hz,
+                doppler_rate_hz_s=doppler_rate_hz_s,
+                code_rate_rate_hz_s=code_rate_rate_hz_s,
                 original_code_phase_chips=code_phase_shift.original_code_phase_chips,
                 code_phase_chips=code_phase_shift.code_phase_chips,
+                reference_code_phase_chips=code_phase_shift.reference_code_phase_chips,
                 source_code_rate_hz=source_code_rate_hz,
             )
         )
@@ -552,7 +600,7 @@ def plan_relocation_overlay(
         f"Baseline PVT: {baseline['latitude_deg']:.6f}, {baseline['longitude_deg']:.6f}, {baseline['altitude_m']:.1f} m.",
         f"Target PVT: {target_latitude_deg:.6f}, {target_longitude_deg:.6f}, {target_altitude_m:.1f} m.",
         f"Offset: east {float(np.dot(shift_ecef, east)):.1f} m, north {float(np.dot(shift_ecef, north)):.1f} m, up {float(np.dot(shift_ecef, up)):.1f} m.",
-        f"Overlay: {len(channels)} received PRNs, fractional code phase, range-rate compensation, target {target_cn0_dbhz:.1f} dB-Hz, {backend} backend.",
+        f"Overlay: {len(channels)} received PRNs, LNAV time shifts, fractional code phase, Doppler/range-rate drift, target {target_cn0_dbhz:.1f} dB-Hz, {backend} backend.",
     )
     return RelocationOverlayPlan(
         input_path=str(source),
@@ -579,7 +627,7 @@ def plan_relocation_overlay(
 
 
 def _required_nav_bits(total_samples: int, sample_rate_hz: float) -> int:
-    return max(1, int(np.ceil(float(total_samples) / float(sample_rate_hz) * NAV_BIT_RATE_BPS)) + 2)
+    return max(1, int(np.ceil(float(total_samples) / float(sample_rate_hz) * NAV_BIT_RATE_BPS)) + NAV_BIT_GUARD_BITS * 2)
 
 
 def code_phase_for_range_delta(
@@ -613,6 +661,28 @@ def _synthetic_code_rate_hz(source_code_rate_hz: float, range_delta_rate_m_s: fl
     return float(source_code_rate_hz) * (1.0 - float(range_delta_rate_m_s) / SPEED_OF_LIGHT_M_S)
 
 
+def _synthetic_code_rate_rate_hz_s(source_code_rate_hz: float, range_delta_acceleration_m_s2: float) -> float:
+    if not np.isfinite(source_code_rate_hz) or source_code_rate_hz <= 0.0:
+        raise ValueError("Source code rate must be positive.")
+    if not np.isfinite(range_delta_acceleration_m_s2):
+        raise ValueError("Range-delta acceleration must be finite.")
+    return -float(source_code_rate_hz) * float(range_delta_acceleration_m_s2) / SPEED_OF_LIGHT_M_S
+
+
+def _synthetic_doppler_hz(source_doppler_hz: float, range_delta_rate_m_s: float) -> float:
+    if not np.isfinite(source_doppler_hz):
+        raise ValueError("Source Doppler must be finite.")
+    if not np.isfinite(range_delta_rate_m_s):
+        raise ValueError("Range-delta rate must be finite.")
+    return float(source_doppler_hz) - float(range_delta_rate_m_s) / GPS_L1_WAVELENGTH_M
+
+
+def _synthetic_doppler_rate_hz_s(range_delta_acceleration_m_s2: float) -> float:
+    if not np.isfinite(range_delta_acceleration_m_s2):
+        raise ValueError("Range-delta acceleration must be finite.")
+    return -float(range_delta_acceleration_m_s2) / GPS_L1_WAVELENGTH_M
+
+
 def _range_rate_m_s(satellite_ecef_m: np.ndarray, satellite_velocity_m_s: np.ndarray, receiver_ecef_m: np.ndarray) -> float:
     line = np.asarray(satellite_ecef_m, dtype=np.float64) - np.asarray(receiver_ecef_m, dtype=np.float64)
     distance = float(np.linalg.norm(line))
@@ -620,6 +690,24 @@ def _range_rate_m_s(satellite_ecef_m: np.ndarray, satellite_velocity_m_s: np.nda
         return 0.0
     unit = line / distance
     return float(np.dot(unit, np.asarray(satellite_velocity_m_s, dtype=np.float64)))
+
+
+def _range_acceleration_m_s2(
+    satellite_ecef_m: np.ndarray,
+    satellite_velocity_m_s: np.ndarray,
+    satellite_acceleration_m_s2: np.ndarray,
+    receiver_ecef_m: np.ndarray,
+) -> float:
+    line = np.asarray(satellite_ecef_m, dtype=np.float64) - np.asarray(receiver_ecef_m, dtype=np.float64)
+    distance = float(np.linalg.norm(line))
+    if distance <= 0.0 or not np.isfinite(distance):
+        return 0.0
+    unit = line / distance
+    velocity = np.asarray(satellite_velocity_m_s, dtype=np.float64)
+    acceleration = np.asarray(satellite_acceleration_m_s2, dtype=np.float64)
+    radial_velocity = float(np.dot(unit, velocity))
+    transverse_speed_sq = max(0.0, float(np.dot(velocity, velocity)) - radial_velocity * radial_velocity)
+    return float(np.dot(unit, acceleration) + transverse_speed_sq / distance)
 
 
 def _range_delta_rate_m_s(
@@ -633,6 +721,36 @@ def _range_delta_rate_m_s(
     target_rate = _range_rate_m_s(satellite_ecef_m, satellite_velocity_m_s, target_ecef_m)
     baseline_rate = _range_rate_m_s(satellite_ecef_m, satellite_velocity_m_s, baseline_ecef_m)
     return float(target_rate - baseline_rate)
+
+
+def _range_delta_acceleration_m_s2(
+    satellite_ecef_m: np.ndarray,
+    satellite_velocity_m_s: np.ndarray,
+    satellite_acceleration_m_s2: np.ndarray,
+    baseline_ecef_m: np.ndarray,
+    target_ecef_m: np.ndarray,
+) -> float:
+    """Return d2(target range - baseline range) / dt2 for a static relocation."""
+
+    target_acceleration = _range_acceleration_m_s2(
+        satellite_ecef_m,
+        satellite_velocity_m_s,
+        satellite_acceleration_m_s2,
+        target_ecef_m,
+    )
+    baseline_acceleration = _range_acceleration_m_s2(
+        satellite_ecef_m,
+        satellite_velocity_m_s,
+        satellite_acceleration_m_s2,
+        baseline_ecef_m,
+    )
+    return float(target_acceleration - baseline_acceleration)
+
+
+def _nav_time_shift_samples(range_delta_samples: float, sample_rate_hz: float) -> int:
+    samples_per_ms = max(1, int(round(float(sample_rate_hz) * 1e-3)))
+    code_periods = int(round(float(range_delta_samples) / float(samples_per_ms)))
+    return int(code_periods * samples_per_ms)
 
 
 def _file_start_code_phase_chips(
@@ -680,6 +798,7 @@ def _shift_code_phase_from_geometry(
         code_phase_samples=_code_phase_chips_to_samples(shifted_chips, sample_rate_hz),
         original_code_phase_chips=float(baseline_chips),
         code_phase_chips=float(shifted_chips),
+        reference_code_phase_chips=float(target_reference_chips),
     )
 
 
@@ -724,6 +843,44 @@ def _initial_code_phase_chips(channel: RelocationChannelPlan, sample_rate_hz: fl
     return code_phase_samples_to_chips(channel.code_phase_samples, sample_rate_hz)
 
 
+def _reference_code_phase_chips(channel: RelocationChannelPlan) -> float | None:
+    if channel.reference_code_phase_chips is None:
+        return None
+    value = float(channel.reference_code_phase_chips)
+    return value % float(CA_CODE_LENGTH) if np.isfinite(value) else None
+
+
+def _source_reference_sample(channel: RelocationChannelPlan) -> int:
+    if channel.source_reference_sample is None:
+        return 0
+    return int(channel.source_reference_sample)
+
+
+def _code_chip_positions(
+    absolute_samples: np.ndarray,
+    sample_rate_hz: float,
+    code_rate_hz: float,
+    code_rate_rate_hz_s: float,
+    initial_code_phase_chips: float,
+    reference_sample: int,
+    reference_code_phase_chips: float | None,
+) -> np.ndarray:
+    if reference_code_phase_chips is None:
+        time_s = absolute_samples / float(sample_rate_hz)
+        return (
+            float(initial_code_phase_chips)
+            + float(code_rate_hz) * time_s
+            + 0.5 * float(code_rate_rate_hz_s) * time_s * time_s
+        )
+
+    relative_time_s = (absolute_samples - float(reference_sample)) / float(sample_rate_hz)
+    return (
+        float(reference_code_phase_chips)
+        + float(code_rate_hz) * relative_time_s
+        + 0.5 * float(code_rate_rate_hz_s) * relative_time_s * relative_time_s
+    )
+
+
 def _generate_relocation_satellite_block(
     config: SyntheticSatelliteConfig,
     start_sample: int,
@@ -733,6 +890,11 @@ def _generate_relocation_satellite_block(
     reference_bit_index: int,
     code_rate_hz: float,
     initial_code_phase_chips: float | None = None,
+    reference_code_phase_chips: float | None = None,
+    code_phase_reference_sample: int = 0,
+    code_rate_rate_hz_s: float = 0.0,
+    doppler_rate_hz_s: float = 0.0,
+    doppler_reference_sample: int = 0,
 ) -> np.ndarray:
     if sample_count == 0:
         return np.empty(0, dtype=np.complex64)
@@ -743,14 +905,18 @@ def _generate_relocation_satellite_block(
         if initial_code_phase_chips is None
         else float(initial_code_phase_chips)
     )
-    block_code_phase = code_phase_chips + (float(start_sample) * code_rate_hz / config.sample_rate_hz)
-    code = sample_ca_code(
-        config.prn,
+    chip_positions = _code_chip_positions(
+        absolute_samples,
         config.sample_rate_hz,
-        sample_count,
-        code_phase_chips=block_code_phase,
-        code_rate_hz=code_rate_hz,
+        code_rate_hz,
+        code_rate_rate_hz_s,
+        code_phase_chips,
+        code_phase_reference_sample,
+        reference_code_phase_chips,
     )
+    base_code = generate_ca_code(config.prn)
+    chip_indices = np.floor(chip_positions).astype(np.int64) % CA_CODE_LENGTH
+    code = base_code[chip_indices]
     bit_indices = _nav_bit_indices(
         start_sample,
         sample_count,
@@ -763,7 +929,13 @@ def _generate_relocation_satellite_block(
     nav_symbols = (1 - 2 * nav_bits[bit_indices]).astype(np.float32)
 
     phase_rad = np.deg2rad(config.carrier_phase_deg)
-    phase = 2.0 * np.pi * config.doppler_hz * absolute_samples / config.sample_rate_hz + phase_rad
+    carrier_time_s = (absolute_samples - float(doppler_reference_sample)) / config.sample_rate_hz
+    phase = (
+        2.0
+        * np.pi
+        * (config.doppler_hz * carrier_time_s + 0.5 * float(doppler_rate_hz_s) * carrier_time_s * carrier_time_s)
+        + phase_rad
+    )
     carrier = np.empty(sample_count, dtype=np.complex64)
     carrier.real = np.cos(phase).astype(np.float32)
     carrier.imag = np.sin(phase).astype(np.float32)
@@ -780,6 +952,11 @@ def _generate_relocation_satellite_block_gpu(
     reference_bit_index: int,
     code_rate_hz: float,
     initial_code_phase_chips: float | None = None,
+    reference_code_phase_chips: float | None = None,
+    code_phase_reference_sample: int = 0,
+    code_rate_rate_hz_s: float = 0.0,
+    doppler_rate_hz_s: float = 0.0,
+    doppler_reference_sample: int = 0,
 ):
     cp = _load_cupy()
     if sample_count == 0:
@@ -791,9 +968,21 @@ def _generate_relocation_satellite_block_gpu(
         if initial_code_phase_chips is None
         else float(initial_code_phase_chips)
     )
-    block_code_phase = code_phase_chips + (float(start_sample) * code_rate_hz / config.sample_rate_hz)
     base_code = cp.asarray(generate_ca_code(config.prn), dtype=cp.float32)
-    chip_positions = block_code_phase + (cp.arange(sample_count, dtype=cp.float64) * code_rate_hz / config.sample_rate_hz)
+    if reference_code_phase_chips is None:
+        code_time_s = absolute_samples / config.sample_rate_hz
+        chip_positions = (
+            float(code_phase_chips)
+            + float(code_rate_hz) * code_time_s
+            + 0.5 * float(code_rate_rate_hz_s) * code_time_s * code_time_s
+        )
+    else:
+        code_time_s = (absolute_samples - float(code_phase_reference_sample)) / config.sample_rate_hz
+        chip_positions = (
+            float(reference_code_phase_chips)
+            + float(code_rate_hz) * code_time_s
+            + 0.5 * float(code_rate_rate_hz_s) * code_time_s * code_time_s
+        )
     chip_indices = cp.floor(chip_positions).astype(cp.int64) % 1023
     code = base_code[chip_indices]
 
@@ -803,7 +992,13 @@ def _generate_relocation_satellite_block_gpu(
     nav_symbols = (1 - 2 * nav_gpu[bit_indices]).astype(cp.float32)
 
     phase_rad = np.deg2rad(config.carrier_phase_deg)
-    phase = 2.0 * cp.pi * config.doppler_hz * absolute_samples / config.sample_rate_hz + phase_rad
+    carrier_time_s = (absolute_samples - float(doppler_reference_sample)) / config.sample_rate_hz
+    phase = (
+        2.0
+        * cp.pi
+        * (config.doppler_hz * carrier_time_s + 0.5 * float(doppler_rate_hz_s) * carrier_time_s * carrier_time_s)
+        + phase_rad
+    )
     carrier = cp.empty(sample_count, dtype=cp.complex64)
     carrier.real = cp.cos(phase).astype(cp.float32)
     carrier.imag = cp.sin(phase).astype(cp.float32)
@@ -822,6 +1017,8 @@ def _mix_relocation_block(
         mixed_gpu = cp.asarray(data, dtype=cp.complex64)
         for channel in plan.channels:
             initial_phase = _initial_code_phase_chips(channel, plan.sample_rate_hz)
+            reference_phase = _reference_code_phase_chips(channel)
+            source_reference_sample = _source_reference_sample(channel)
             config = SyntheticSatelliteConfig(
                 sample_rate_hz=plan.sample_rate_hz,
                 prn=channel.prn,
@@ -841,12 +1038,19 @@ def _mix_relocation_block(
                 channel.reference_bit_index,
                 channel.code_rate_hz,
                 initial_phase,
+                reference_phase,
+                source_reference_sample,
+                channel.code_rate_rate_hz_s,
+                channel.doppler_rate_hz_s,
+                source_reference_sample,
             )
         return cp.asnumpy(mixed_gpu).astype(np.complex64, copy=False)
 
     mixed = data.astype(np.complex64, copy=True)
     for channel in plan.channels:
         initial_phase = _initial_code_phase_chips(channel, plan.sample_rate_hz)
+        reference_phase = _reference_code_phase_chips(channel)
+        source_reference_sample = _source_reference_sample(channel)
         config = SyntheticSatelliteConfig(
             sample_rate_hz=plan.sample_rate_hz,
             prn=channel.prn,
@@ -866,6 +1070,11 @@ def _mix_relocation_block(
             channel.reference_bit_index,
             channel.code_rate_hz,
             initial_phase,
+            reference_phase,
+            source_reference_sample,
+            channel.code_rate_rate_hz_s,
+            channel.doppler_rate_hz_s,
+            source_reference_sample,
         )
     return mixed.astype(np.complex64, copy=False)
 
@@ -989,6 +1198,7 @@ def add_relocation_overlay_to_file(
                     "notes": [
                         "Original samples are preserved; stronger synthetic replicas are added.",
                         "LNAV payload words are replayed from decoded source satellites with regenerated TLM/HOW timing.",
+                        "Per-PRN LNAV arrival time, fractional C/A phase, carrier Doppler, Doppler drift, and code-rate drift are fitted from target geometry.",
                     ],
                 },
                 indent=2,
