@@ -331,6 +331,7 @@ def build_lnav_bit_stream_from_templates(
     start_tow_count: int,
     start_subframe_id: int,
     reference_bit_index: int = 0,
+    subframe_cycle_ids: Sequence[int] | None = None,
 ) -> np.ndarray:
     """Build a continuous LNAV stream from decoded raw subframe payloads.
 
@@ -343,6 +344,15 @@ def build_lnav_bit_stream_from_templates(
         raise ValueError("Number of navigation bits must not be negative.")
     if start_subframe_id < 1 or start_subframe_id > 5:
         raise ValueError("Start subframe ID must be in the range 1..5.")
+    if subframe_cycle_ids is None:
+        cycle_ids = tuple(range(1, 6))
+    else:
+        cycle_ids = tuple(int(value) for value in subframe_cycle_ids)
+        if not cycle_ids or any(value < 1 or value > 5 for value in cycle_ids):
+            raise ValueError("Subframe cycle IDs must be in the range 1..5.")
+        if int(start_subframe_id) not in cycle_ids:
+            raise ValueError("Start subframe ID must be present in the selected cycle.")
+    start_cycle_index = cycle_ids.index(int(start_subframe_id))
     reference_bit_index = int(reference_bit_index)
     if reference_bit_index < 0:
         raise ValueError("Reference bit index must not be negative.")
@@ -360,7 +370,7 @@ def build_lnav_bit_stream_from_templates(
         raise ValueError(f"Missing ephemeris subframe template(s): {missing}.")
 
     def append_subframe(stream: list[int], subframe_index: int, previous_word: list[int] | None) -> list[int]:
-        subframe_id = ((int(start_subframe_id) - 1 + subframe_index) % 5) + 1
+        subframe_id = cycle_ids[(start_cycle_index + int(subframe_index)) % len(cycle_ids)]
         payload_words = templates_by_id.get(subframe_id)
         if payload_words is None:
             payload_words = templates_by_id[((subframe_id - 1) % 3) + 1]

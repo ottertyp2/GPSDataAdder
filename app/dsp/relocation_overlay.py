@@ -50,7 +50,9 @@ DEFAULT_RELOCATION_CN0_DBHZ = 56.0
 DEFAULT_RELOCATION_TRACKING_S = 72.0
 DEFAULT_RELOCATION_MAX_SATELLITES = 8
 DEFAULT_TARGET_OVERLAY_SATELLITES = 8
+TARGET_SYNTHETIC_AMPLITUDE_SCALE = 2.0
 MIN_TARGET_ELEVATION_DEG = 5.0
+NOMINAL_GPS_SIGNAL_TRANSIT_S = 0.075
 NAV_BIT_GUARD_BITS = 64
 
 
@@ -432,6 +434,7 @@ print(
                 "longitude_deg": float(solution.longitude_deg),
                 "altitude_m": float(solution.altitude_m),
             },
+            "receiver_time_offset_s": None if pvt_result.receiver_time_offset_s is None else float(pvt_result.receiver_time_offset_s),
             "residual_rms_m": pvt_result.residual_rms_m,
             "channels": channels,
             "summary_lines": pvt_result.summary_lines,
@@ -615,6 +618,7 @@ def plan_relocation_overlay(
         analysis_channels=list(analysis["channels"]),
         used_prns=used_prns,
         sample_rate_hz=float(sample_rate_hz),
+        duration_s=float(total_samples) / float(sample_rate_hz),
         target_latitude_deg=float(target_latitude_deg),
         target_longitude_deg=float(target_longitude_deg),
         target_altitude_m=float(target_altitude_m),
@@ -622,6 +626,7 @@ def plan_relocation_overlay(
         amplitude=float(amplitude_estimate.amplitude),
         existing_channels=channels,
         desired_channel_count=DEFAULT_TARGET_OVERLAY_SATELLITES,
+        receiver_time_offset_s=analysis.get("receiver_time_offset_s"),
     )
     channels.extend(synthetic_channels)
     if len(channels) < 4:
@@ -898,15 +903,37 @@ def _reference_context_from_analysis(analysis_channels: list[dict[str, object]])
     return tow_count, subframe_id, reference_file_time_s, transmit_time_s
 
 
+def _tow_count_for_transmit_time(transmit_time_s: float) -> int:
+    max_tow_count = int(round(GPS_WEEK_SECONDS / 6.0))
+    return int(round((float(transmit_time_s) + 6.0) / 6.0)) % max_tow_count
+
+
+def _transmit_time_from_tow_count(tow_count: int) -> float:
+    return float((int(tow_count) * 6 - 6) % int(GPS_WEEK_SECONDS))
+
+
+def _tow_count_for_file_time(
+    reference_file_time_s: float,
+    receiver_time_offset_s: float,
+    range_m: float,
+) -> int:
+    transmit_time_s = (
+        float(reference_file_time_s)
+        + float(receiver_time_offset_s)
+        - float(range_m) / SPEED_OF_LIGHT_M_S
+    )
+    return _tow_count_for_transmit_time(transmit_time_s)
+
+
 def _synthetic_channel_timing(
     satellite_ecef_m: np.ndarray,
     target_ecef_m: np.ndarray,
     sample_rate_hz: float,
-    reference_file_time_s: float,
-    median_range_m: float,
+    transmit_time_s: float,
+    receiver_time_offset_s: float,
 ) -> tuple[int, int, float, float]:
     range_m = float(np.linalg.norm(np.asarray(satellite_ecef_m, dtype=np.float64) - np.asarray(target_ecef_m, dtype=np.float64)))
-    desired_receive_time_s = float(reference_file_time_s) + (range_m - float(median_range_m)) / SPEED_OF_LIGHT_M_S
+    desired_receive_time_s = float(transmit_time_s) - float(receiver_time_offset_s) + range_m / SPEED_OF_LIGHT_M_S
     bit_start_time_s = round(desired_receive_time_s * 1000.0) / 1000.0
     code_phase_s = bit_start_time_s - desired_receive_time_s
     reference_sample = int(round(bit_start_time_s * float(sample_rate_hz)))
@@ -927,56 +954,104 @@ def _build_target_synthetic_channels(
     amplitude: float,
     existing_channels: list[RelocationChannelPlan],
     desired_channel_count: int,
+    receiver_time_offset_s: object | None = None,
+    duration_s: float | None = None,
 ) -> list[RelocationChannelPlan]:
-    if len(existing_channels) >= int(desired_channel_count):
+    desired_synthetic_count = max(0, int(desired_channel_count))
+    if desired_synthetic_count == 0:
         return []
-    start_tow_count, start_subframe_id, reference_file_time_s, transmit_time_s = _reference_context_from_analysis(
+    source_start_tow_count, source_start_subframe_id, source_reference_file_time_s, source_transmit_time_s = _reference_context_from_analysis(
         analysis_channels
     )
+    effective_receiver_time_offset_s = float(receiver_time_offset_s) if receiver_time_offset_s is not None else np.nan
+    centered_reference = (
+        np.isfinite(effective_receiver_time_offset_s)
+        and duration_s is not None
+        and np.isfinite(float(duration_s))
+        and float(duration_s) > 0.0
+    )
+    if centered_reference:
+        reference_file_time_s = max(0.0, min(float(duration_s), float(duration_s) * 0.5))
+        start_tow_count = _tow_count_for_file_time(
+            reference_file_time_s,
+            effective_receiver_time_offset_s,
+            NOMINAL_GPS_SIGNAL_TRANSIT_S * SPEED_OF_LIGHT_M_S,
+        )
+        start_subframe_id = 1
+        transmit_time_s = _transmit_time_from_tow_count(start_tow_count)
+    else:
+        start_tow_count = source_start_tow_count
+        start_subframe_id = source_start_subframe_id
+        reference_file_time_s = source_reference_file_time_s
+        transmit_time_s = source_transmit_time_s
     existing_channel_prns = {int(channel.prn) for channel in existing_channels}
-    existing_satellites: list[np.ndarray] = []
+    base_existing_satellites: list[np.ndarray] = []
     for raw_channel in analysis_channels:
         prn = int(raw_channel["prn"])
         if prn in existing_channel_prns:
-            existing_satellites.append(np.asarray(raw_channel["satellite_position_m"], dtype=np.float64))
+            base_existing_satellites.append(np.asarray(raw_channel["satellite_position_m"], dtype=np.float64))
 
-    selected: list[tuple[int, float, dict[str, float], np.ndarray]] = []
-    while len(existing_channels) + len(selected) < int(desired_channel_count):
-        best: tuple[int, float, float, dict[str, float], np.ndarray] | None = None
-        for prn in range(1, 33):
-            if prn in used_prns or any(item[0] == prn for item in selected):
-                continue
-            candidates = _synthetic_orbit_candidates_for_prn(
-                prn,
-                transmit_time_s,
-                target_latitude_deg,
-                target_longitude_deg,
-                target_ecef_m,
-                existing_satellites,
-            )
-            if not candidates:
-                continue
-            score, elevation, elements, satellite = candidates[0]
-            if best is None or score > best[1]:
-                best = (prn, score, elevation, elements, satellite)
-        if best is None:
-            break
-        prn, _score, elevation, elements, satellite = best
-        selected.append((prn, float(elevation), elements, satellite))
-        existing_satellites.append(satellite)
+    def select_channels(at_transmit_time_s: float) -> list[tuple[int, float, dict[str, float], np.ndarray]]:
+        selected_rows: list[tuple[int, float, dict[str, float], np.ndarray]] = []
+        existing_satellites = [np.asarray(satellite, dtype=np.float64) for satellite in base_existing_satellites]
+        while len(selected_rows) < desired_synthetic_count:
+            best: tuple[int, float, float, dict[str, float], np.ndarray] | None = None
+            for prn in range(1, 33):
+                if prn in used_prns or any(item[0] == prn for item in selected_rows):
+                    continue
+                candidates = _synthetic_orbit_candidates_for_prn(
+                    prn,
+                    at_transmit_time_s,
+                    target_latitude_deg,
+                    target_longitude_deg,
+                    target_ecef_m,
+                    existing_satellites,
+                )
+                if not candidates:
+                    continue
+                score, elevation, elements, satellite = candidates[0]
+                if best is None or score > best[1]:
+                    best = (prn, score, elevation, elements, satellite)
+            if best is None:
+                break
+            prn, _score, elevation, elements, satellite = best
+            selected_rows.append((prn, float(elevation), elements, satellite))
+            existing_satellites.append(satellite)
+        return selected_rows
+
+    selected = select_channels(transmit_time_s)
 
     if not selected:
         return []
-    ranges = [
-        float(np.linalg.norm(np.asarray(satellite, dtype=np.float64) - np.asarray(target_ecef_m, dtype=np.float64)))
-        for _prn, _elevation, _elements, satellite in selected
-    ]
-    ranges.extend(
-        float(np.linalg.norm(np.asarray(raw["satellite_position_m"], dtype=np.float64) - np.asarray(target_ecef_m, dtype=np.float64)))
-        for raw in analysis_channels
-        if int(raw["prn"]) in existing_channel_prns
-    )
+
+    def channel_ranges(rows: list[tuple[int, float, dict[str, float], np.ndarray]]) -> list[float]:
+        ranges = [
+            float(np.linalg.norm(np.asarray(satellite, dtype=np.float64) - np.asarray(target_ecef_m, dtype=np.float64)))
+            for _prn, _elevation, _elements, satellite in rows
+        ]
+        ranges.extend(
+            float(np.linalg.norm(np.asarray(raw["satellite_position_m"], dtype=np.float64) - np.asarray(target_ecef_m, dtype=np.float64)))
+            for raw in analysis_channels
+            if int(raw["prn"]) in existing_channel_prns
+        )
+        return ranges
+
+    ranges = channel_ranges(selected)
     median_range_m = float(np.median(np.asarray(ranges, dtype=np.float64)))
+    if centered_reference:
+        refined_tow_count = _tow_count_for_file_time(
+            reference_file_time_s,
+            effective_receiver_time_offset_s,
+            median_range_m,
+        )
+        if refined_tow_count != start_tow_count:
+            start_tow_count = refined_tow_count
+            transmit_time_s = _transmit_time_from_tow_count(start_tow_count)
+            selected = select_channels(transmit_time_s)
+            ranges = channel_ranges(selected)
+            median_range_m = float(np.median(np.asarray(ranges, dtype=np.float64)))
+    if not np.isfinite(effective_receiver_time_offset_s):
+        effective_receiver_time_offset_s = float(transmit_time_s) + median_range_m / SPEED_OF_LIGHT_M_S - float(reference_file_time_s)
     channels: list[RelocationChannelPlan] = []
     for prn, elevation, elements, satellite in selected:
         satellite_minus = _rotated_synthetic_position(elements, transmit_time_s - 1.0, target_ecef_m)
@@ -994,8 +1069,8 @@ def _build_target_synthetic_channels(
             satellite,
             target_ecef_m,
             sample_rate_hz,
-            reference_file_time_s,
-            median_range_m,
+            transmit_time_s,
+            effective_receiver_time_offset_s,
         )
         code_rate_hz = _synthetic_code_rate_hz(CA_CODE_RATE_HZ, range_rate_m_s)
         code_rate_rate_hz_s = _synthetic_code_rate_rate_hz_s(CA_CODE_RATE_HZ, range_acceleration_m_s2)
@@ -1034,7 +1109,7 @@ def _build_target_synthetic_channels(
                 code_phase_samples=phase_shift.code_phase_samples,
                 range_delta_m=range_m,
                 range_delta_samples=range_m / SPEED_OF_LIGHT_M_S * float(sample_rate_hz),
-                amplitude=float(amplitude),
+                amplitude=float(amplitude) * TARGET_SYNTHETIC_AMPLITUDE_SCALE,
                 start_tow_count=int(start_tow_count),
                 start_subframe_id=int(start_subframe_id),
                 reference_bit_index=reference_bit_index,
@@ -1493,6 +1568,7 @@ def add_relocation_overlay_to_file(
             start_tow_count=channel.start_tow_count,
             start_subframe_id=channel.start_subframe_id,
             reference_bit_index=channel.reference_bit_index,
+            subframe_cycle_ids=(1, 2, 3) if channel.synthetic_ephemeris else None,
         )
         for channel in plan.channels
     }

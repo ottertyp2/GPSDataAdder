@@ -122,6 +122,43 @@ def test_lnav_templates_can_align_reference_subframe_inside_stream() -> None:
     assert estimate.subframe_id == 3
 
 
+def test_lnav_templates_can_repeat_ephemeris_subframe_cycle() -> None:
+    rng = np.random.default_rng(14)
+    previous = None
+    templates = []
+    for subframe_id in (1, 2, 3):
+        words = build_synthetic_subframe(subframe_id, 1000 + subframe_id, rng, previous)
+        previous = words[-1]
+        templates.append(
+            {
+                "subframe_id": subframe_id,
+                "tow_count": 1000 + subframe_id,
+                "words": ["".join(str(bit) for bit in word) for word in words],
+            }
+        )
+
+    bits = build_lnav_bit_stream_from_templates(
+        LNAV_SUBFRAME_BITS * 4,
+        templates,
+        start_tow_count=5000,
+        start_subframe_id=1,
+        subframe_cycle_ids=(1, 2, 3),
+    ).astype(int).tolist()
+    previous_word: list[int] | None = None
+    subframe_ids: list[int] = []
+
+    for start in range(0, len(bits), LNAV_SUBFRAME_BITS):
+        tlm = bits[start : start + LNAV_WORD_BITS]
+        how = bits[start + LNAV_WORD_BITS : start + 2 * LNAV_WORD_BITS]
+        assert check_lnav_word(tlm, previous_word)
+        assert check_lnav_word(how, tlm)
+        how_data = extract_lnav_data_bits(how, tlm)
+        subframe_ids.append(int("".join(str(bit) for bit in how_data[19:22]), 2))
+        previous_word = bits[start + 9 * LNAV_WORD_BITS : start + 10 * LNAV_WORD_BITS]
+
+    assert subframe_ids == [1, 2, 3, 1]
+
+
 def test_broadcast_ephemeris_templates_are_parity_valid_and_visible() -> None:
     templates = build_broadcast_ephemeris_templates(
         week_number_mod1024=2400 % 1024,

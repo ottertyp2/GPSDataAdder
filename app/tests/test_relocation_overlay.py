@@ -8,6 +8,8 @@ import numpy as np
 
 from app.dsp.lnav import build_synthetic_subframe
 from app.dsp.relocation_overlay import (
+    CA_CODE_LENGTH,
+    CA_CODE_RATE_HZ,
     GPS_L1_WAVELENGTH_M,
     RelocationChannelPlan,
     RelocationOverlayPlan,
@@ -20,9 +22,11 @@ from app.dsp.relocation_overlay import (
     _satellite_elevation_deg,
     _synthetic_doppler_hz,
     _synthetic_doppler_rate_hz_s,
+    _build_target_synthetic_channels,
     _shift_code_phase_from_geometry,
     _shift_code_phase_samples_from_geometry,
     _synthetic_code_rate_hz,
+    _synthetic_channel_timing,
     lla_to_ecef,
 )
 from app.dsp.synthetic_satellite import SyntheticSatelliteConfig
@@ -181,6 +185,71 @@ def test_target_elevation_rejects_opposite_side_satellite() -> None:
 
     assert _satellite_elevation_deg(overhead, 0.0, 0.0, receiver) > 80.0
     assert _satellite_elevation_deg(opposite, 0.0, 0.0, receiver) < -80.0
+
+
+def test_synthetic_channel_timing_uses_receiver_clock_offset() -> None:
+    sample_rate_hz = 6_061_000.0
+    receiver = lla_to_ecef(50.0, 7.0, 100.0)
+    satellite = receiver + np.asarray([20_000_000.0, 5_000_000.0, 16_000_000.0])
+    transmit_time_s = 221_490.0
+    receiver_time_offset_s = 221_424.850
+
+    reference_sample, _bit_index, reference_code_phase_chips, range_m = _synthetic_channel_timing(
+        satellite,
+        receiver,
+        sample_rate_hz,
+        transmit_time_s,
+        receiver_time_offset_s,
+    )
+
+    bit_start_time_s = reference_sample / sample_rate_hz
+    phase_chips = reference_code_phase_chips
+    if phase_chips > CA_CODE_LENGTH * 0.5:
+        phase_chips -= CA_CODE_LENGTH
+    reconstructed_receive_time_s = bit_start_time_s - phase_chips / CA_CODE_RATE_HZ
+    expected_receive_time_s = transmit_time_s - receiver_time_offset_s + range_m / SPEED_OF_LIGHT_M_S
+
+    assert np.isclose(reconstructed_receive_time_s, expected_receive_time_s, atol=1e-10)
+
+
+def test_target_synthetic_channels_anchor_timing_near_file_center() -> None:
+    sample_rate_hz = 6_061_000.0
+    target_latitude_deg = -0.1807
+    target_longitude_deg = -78.4678
+    target_altitude_m = 2850.0
+    target = lla_to_ecef(target_latitude_deg, target_longitude_deg, target_altitude_m)
+    analysis_channels = [
+        {
+            "prn": 1,
+            "start_tow_count": 36_915,
+            "start_subframe_id": 1,
+            "reference_file_time_s": 65.0,
+            "satellite_position_m": (target + np.asarray([20_000_000.0, 0.0, 15_000_000.0])).tolist(),
+        }
+    ]
+
+    channels = _build_target_synthetic_channels(
+        analysis_channels=analysis_channels,
+        used_prns={1},
+        sample_rate_hz=sample_rate_hz,
+        target_latitude_deg=target_latitude_deg,
+        target_longitude_deg=target_longitude_deg,
+        target_altitude_m=target_altitude_m,
+        target_ecef_m=target,
+        amplitude=0.1,
+        existing_channels=[],
+        desired_channel_count=4,
+        receiver_time_offset_s=221_424.850,
+        duration_s=600.0,
+    )
+
+    assert len(channels) == 4
+    for channel in channels:
+        phase_chips = float(channel.reference_code_phase_chips or 0.0)
+        if phase_chips > CA_CODE_LENGTH * 0.5:
+            phase_chips -= CA_CODE_LENGTH
+        receive_time_s = channel.reference_sample / sample_rate_hz - phase_chips / CA_CODE_RATE_HZ
+        assert 297.0 <= receive_time_s <= 303.0
 
 
 def test_relocation_generator_uses_fractional_code_phase() -> None:
